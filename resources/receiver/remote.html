@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>AirWing remote</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #0f1219; color: #e6eaf2; font-family: system-ui, -apple-system, 'Segoe UI', sans-serif; padding: 16px; padding-bottom: 40px; }
+  h1 { font-size: 18px; margin: 4px 0 12px; display: flex; align-items: center; gap: 8px; }
+  h1 span { color: #4cc2ff; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: #8a94a8; margin: 20px 0 8px; }
+  .card { background: #1e2534; border: 1px solid #2a3345; border-radius: 12px; padding: 12px; margin-bottom: 10px; }
+  .row { display: flex; align-items: center; gap: 10px; }
+  .grow { flex: 1; min-width: 0; }
+  .name { font-weight: 600; }
+  .meta { color: #8a94a8; font-size: 12px; }
+  button { font: inherit; font-size: 15px; padding: 10px 14px; border-radius: 10px; border: 1px solid #2a3345; background: #161b26; color: #e6eaf2; }
+  button.primary { background: #2f8ff0; border-color: #2f8ff0; color: #fff; }
+  button.danger { border-color: #ff5d6c; color: #ff5d6c; background: transparent; }
+  button.big { flex: 1; padding: 16px; font-size: 17px; }
+  .controls { display: flex; gap: 10px; margin: 10px 0; }
+  input[type=range] { width: 100%; }
+  .status { display: flex; align-items: center; gap: 8px; color: #8a94a8; font-size: 13px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: #8a94a8; }
+  .dot.live { background: #3ddc84; box-shadow: 0 0 8px #3ddc84; }
+  .dot.paused { background: #ffc857; }
+  .toast { position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%); background: #ff5d6c; color: #fff; padding: 8px 14px; border-radius: 8px; display: none; }
+</style>
+</head>
+<body>
+<h1><span>✈</span> <span id="name">AirWing</span> remote</h1>
+<div class="status"><div class="dot" id="dot"></div><span id="statusText">Connecting…</span></div>
+<div class="controls">
+  <button class="big primary" id="btnStart">▶ Start</button>
+  <button class="big" id="btnPause">⏸ Pause</button>
+  <button class="big danger" id="btnStop">■ Stop</button>
+</div>
+<h2>Receivers</h2>
+<div id="sessions"></div>
+<div id="devices"></div>
+<div class="toast" id="toast"></div>
+<script>
+(function () {
+  const token = new URLSearchParams(location.search).get('token') || '';
+  let ws, state = null, id = 0;
+  const $ = (s) => document.querySelector(s);
+  function send(cmd) { if (ws && ws.readyState === 1) { cmd.id = ++id; ws.send(JSON.stringify(cmd)); } }
+  function toast(t) { const el = $('#toast'); el.textContent = t; el.style.display = 'block'; setTimeout(() => el.style.display = 'none', 2500); }
+  function fmt(s) { if (s == null || !isFinite(s)) return '–:––'; return Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0'); }
+  function render() {
+    if (!state) return;
+    $('#name').textContent = state.name || 'AirWing';
+    $('#dot').className = 'dot ' + (state.streaming ? (state.paused ? 'paused' : 'live') : '');
+    const st = state.stats || {};
+    $('#statusText').textContent = state.streaming ? ((state.paused ? 'Paused' : 'Live') + ' · ' + (st.fps || 0) + ' fps · ' + ((st.kbps || 0) / 1000).toFixed(1) + ' Mbps') : 'Idle';
+    $('#btnPause').textContent = state.paused ? '▶ Resume' : '⏸ Pause';
+    $('#btnStart').style.display = state.streaming ? 'none' : '';
+    $('#btnPause').style.display = state.streaming ? '' : 'none';
+    const sessions = state.sessions || [];
+    const active = new Set(sessions.map((s) => s.id));
+    $('#sessions').innerHTML = sessions.map((s) => `
+      <div class="card">
+        <div class="row"><div class="grow"><div class="name">${esc(s.name)}</div><div class="meta">${esc(s.state)}${s.duration ? ' · ' + fmt(s.position) + ' / ' + fmt(s.duration) : ''}</div></div>
+        <button data-act="disconnect" data-id="${esc(s.id)}" class="danger">Stop</button></div>
+        ${s.duration ? `<div class="row" style="margin-top:8px"><button data-act="media" data-id="${esc(s.id)}" data-type="${s.playing ? 'pause' : 'play'}">${s.playing ? '⏸' : '▶'}</button><input type="range" min="0" max="${s.duration}" step="1" value="${s.position || 0}" data-act="seek" data-id="${esc(s.id)}"></div>` : ''}
+        <div class="row" style="margin-top:8px"><span class="meta">Vol</span><input type="range" min="0" max="1" step="0.05" value="1" data-act="volume" data-id="${esc(s.id)}"></div>
+      </div>`).join('');
+    $('#devices').innerHTML = (state.devices || []).filter((d) => !active.has(d.id)).map((d) => `
+      <div class="card row"><div class="grow"><div class="name">${esc(d.name)}</div><div class="meta">${d.kind === 'cast' ? 'Google Cast' : 'AirPlay'}</div></div>
+      <button data-act="connect" data-id="${esc(d.id)}" class="primary">Mirror here</button></div>`).join('') || '<div class="meta">No other receivers found</div>';
+  }
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+  document.body.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-act]'); if (!b) return;
+    const act = b.dataset.act, deviceId = b.dataset.id;
+    if (act === 'connect') send({ type: 'connect', deviceId });
+    if (act === 'disconnect') send({ type: 'disconnect', deviceId });
+    if (act === 'media') send({ type: 'media', deviceId, action: { type: b.dataset.type } });
+  });
+  document.body.addEventListener('change', (e) => {
+    const r = e.target.closest('input[data-act]'); if (!r) return;
+    if (r.dataset.act === 'seek') send({ type: 'media', deviceId: r.dataset.id, action: { type: 'seek', position: Number(r.value) } });
+    if (r.dataset.act === 'volume') send({ type: 'media', deviceId: r.dataset.id, action: { type: 'volume', volume: Number(r.value) } });
+  });
+  $('#btnStart').onclick = () => send({ type: 'start' });
+  $('#btnPause').onclick = () => send({ type: state && state.paused ? 'resume' : 'pause' });
+  $('#btnStop').onclick = () => send({ type: 'stop' });
+  function connect() {
+    ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/remote?token=' + encodeURIComponent(token));
+    ws.onmessage = (ev) => { const m = JSON.parse(ev.data); if (m.type === 'state') { state = m; render(); } else if (m.type === 'reply' && m.ok === false) toast(m.error || 'Command failed'); };
+    ws.onclose = () => { $('#statusText').textContent = 'Reconnecting…'; setTimeout(connect, 1500); };
+  }
+  connect();
+})();
+</script>
+</body>
+</html>

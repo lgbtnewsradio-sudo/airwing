@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>AirWing region</title>
+    <style>
+      html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: rgba(0, 0, 0, 0.35); cursor: crosshair; user-select: none; font-family: system-ui, sans-serif; }
+      #sel { position: absolute; border: 2px solid #4cc2ff; background: rgba(76, 194, 255, 0.12); box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.35); display: none; }
+      #hint { position: absolute; top: 24px; left: 50%; transform: translateX(-50%); background: rgba(15, 18, 25, 0.9); color: #fff; padding: 10px 18px; border-radius: 8px; font-size: 14px; }
+      #size { position: absolute; color: #fff; font-size: 12px; background: rgba(15, 18, 25, 0.9); padding: 2px 6px; border-radius: 4px; display: none; }
+    </style>
+  </head>
+  <body>
+    <div id="hint">Drag to select the region to mirror — Esc to cancel</div>
+    <div id="sel"></div>
+    <div id="size"></div>
+    <script type="module" src="/src/region.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,10 @@
+node_modules/
+out/
+dist/
+release/
+*.log
+.vite/
+test-results/
+playwright-report/
+.playwright/
+*.local

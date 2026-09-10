@@ -1,0 +1,31 @@
+appId: dev.airwing.app
+productName: AirWing
+copyright: Copyright © 2026 AirWing contributors
+directories:
+  output: release
+  buildResources: build
+files:
+  - out/**
+  - resources/**
+  - package.json
+asarUnpack:
+  - resources/**
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: zip
+      arch: [x64]
+  icon: build/icon.png
+  artifactName: ${productName}-${version}-win-${arch}.${ext}
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  allowElevation: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: AirWing
+  deleteAppDataOnUninstall: false
+  # Enterprise deployment: AirWing-<ver>-win-x64.exe /S /D=C:\Path  (silent install)
+publish: null

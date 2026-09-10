@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AirWing receiver</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; color: #e6eaf2; font-family: system-ui, -apple-system, 'Segoe UI', sans-serif; overflow: hidden; }
+  #video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
+  #overlay { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; background: radial-gradient(ellipse at center, #182033 0%, #0b0e15 70%); text-align: center; padding: 24px; }
+  #overlay.hidden { display: none; }
+  .logo { font-size: 56px; color: #4cc2ff; }
+  h1 { font-size: 26px; margin: 0; font-weight: 600; }
+  p { color: #8a94a8; margin: 0; max-width: 520px; line-height: 1.5; }
+  button { font: inherit; font-size: 18px; padding: 12px 28px; border-radius: 10px; border: none; background: #2f8ff0; color: #fff; cursor: pointer; }
+  input { font: inherit; font-size: 24px; letter-spacing: .3em; text-align: center; width: 220px; padding: 10px; border-radius: 8px; border: 1px solid #2a3345; background: #0f1219; color: #fff; }
+  #hud { position: absolute; top: 12px; right: 12px; font-size: 12px; color: #8a94a8; background: rgba(0,0,0,.5); padding: 4px 8px; border-radius: 6px; opacity: 0; transition: opacity .3s; }
+  body:hover #hud { opacity: 1; }
+  #audioOnly { display: none; position: absolute; inset: 0; align-items: center; justify-content: center; flex-direction: column; gap: 12px; }
+  .bars { display: flex; gap: 6px; align-items: flex-end; height: 80px; }
+  .bars i { width: 12px; background: #4cc2ff; border-radius: 3px; animation: bounce 1s infinite ease-in-out; }
+  .bars i:nth-child(2) { animation-delay: .15s } .bars i:nth-child(3) { animation-delay: .3s } .bars i:nth-child(4) { animation-delay: .45s } .bars i:nth-child(5) { animation-delay: .6s }
+  @keyframes bounce { 0%,100% { height: 20% } 50% { height: 100% } }
+</style>
+</head>
+<body>
+<video id="video" autoplay playsinline></video>
+<div id="audioOnly"><div class="bars"><i></i><i></i><i></i><i></i><i></i></div><p id="audioLabel">Audio stream</p></div>
+<div id="overlay">
+  <div class="logo">✈</div>
+  <h1 id="title">AirWing receiver</h1>
+  <p id="status">Connecting…</p>
+  <div id="codeBox" style="display:none"><input id="code" inputmode="numeric" maxlength="6" placeholder="code" /></div>
+  <button id="start" style="display:none">Tap to start watching</button>
+</div>
+<div id="hud"></div>
+<script>
+(function () {
+  const video = document.getElementById('video');
+  const overlay = document.getElementById('overlay');
+  const status = document.getElementById('status');
+  const title = document.getElementById('title');
+  const startBtn = document.getElementById('start');
+  const codeBox = document.getElementById('codeBox');
+  const codeInput = document.getElementById('code');
+  const hud = document.getElementById('hud');
+  const audioOnlyEl = document.getElementById('audioOnly');
+  const params = new URLSearchParams(location.search);
+  let code = params.get('code') || '';
+  let ws = null, ms = null, sb = null, queue = [], meta = null, started = false, bytes = 0, frames = 0, lastLog = performance.now();
+  let needsGesture = false;
+
+  function setStatus(t) { status.textContent = t; }
+
+  async function fetchInfo() {
+    try { const r = await fetch('/api/info'); if (r.ok) { const j = await r.json(); title.textContent = j.name || 'AirWing receiver'; return j; } } catch (e) {}
+    return null;
+  }
+
+  function resetMse() {
+    if (sb && ms && ms.readyState === 'open') { try { ms.removeSourceBuffer(sb); } catch (e) {} }
+    sb = null; ms = null; queue = [];
+  }
+
+  function openMse(mime) {
+    resetMse();
+    ms = new MediaSource();
+    video.src = URL.createObjectURL(ms);
+    ms.addEventListener('sourceopen', () => {
+      try {
+        sb = ms.addSourceBuffer(mime);
+        sb.mode = 'segments';
+        sb.addEventListener('updateend', pump);
+        pump();
+      } catch (e) {
+        setStatus('This browser cannot play ' + mime + ' (' + e.message + ')');
+        overlay.classList.remove('hidden');
+      }
+    }, { once: true });
+  }
+
+  function pump() {
+    if (!sb || sb.updating || !queue.length) return;
+    // Trim old buffered media to keep memory low.
+    try {
+      if (sb.buffered.length && video.currentTime - sb.buffered.start(0) > 30) {
+        sb.remove(0, video.currentTime - 10);
+        return;
+      }
+    } catch (e) {}
+    const chunk = queue.shift();
+    try { sb.appendBuffer(chunk); } catch (e) { console.warn('append failed', e); }
+  }
+
+  function keepLive() {
+    if (!sb || !sb.buffered.length) return;
+    const end = sb.buffered.end(sb.buffered.length - 1);
+    const lag = end - video.currentTime;
+    if (lag > 1.0) { video.currentTime = end - 0.15; }
+    else if (lag > 0.4) video.playbackRate = 1.05;
+    else video.playbackRate = 1.0;
+    if (video.paused && started) video.play().catch(() => {});
+  }
+
+  function connect() {
+    if (ws) { ws.onclose = null; ws.close(); }
+    const url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/view' + (code ? '?code=' + encodeURIComponent(code) : '');
+    ws = new WebSocket(url);
+    ws.binaryType = 'arraybuffer';
+    ws.onopen = () => { setStatus('Connected — waiting for the stream to start…'); codeBox.style.display = 'none'; };
+    ws.onmessage = (ev) => {
+      if (typeof ev.data === 'string') {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === 'meta') {
+          meta = msg;
+          if (!msg.streaming) { setStatus('Connected to ' + (msg.name || 'AirWing') + '. Waiting for the stream to start…'); overlay.classList.remove('hidden'); }
+          if (msg.mime && MediaSource.isTypeSupported(msg.mime)) openMse(msg.mime);
+          else if (msg.mime) setStatus('Unsupported stream format: ' + msg.mime);
+          audioOnlyEl.style.display = msg.audioOnly ? 'flex' : 'none';
+          if (msg.streaming) tryStart();
+        } else if (msg.type === 'end') {
+          setStatus('The stream ended. Waiting for it to start again…');
+          overlay.classList.remove('hidden');
+          resetMse();
+        } else if (msg.type === 'paused') {
+          hud.textContent = msg.paused ? 'Paused' : '';
+        }
+        return;
+      }
+      const buf = ev.data;
+      const dv = new DataView(buf);
+      const kind = dv.getUint8(0);
+      const payload = new Uint8Array(buf, 10);
+      bytes += payload.length;
+      if (kind === 1) frames++;
+      if (kind === 0 && meta && meta.mime && !sb) openMse(meta.mime);
+      queue.push(payload);
+      if (queue.length > 400) queue.splice(0, queue.length - 400);
+      pump();
+      tryStart();
+    };
+    ws.onclose = (ev) => {
+      if (ev.code === 1008 || ev.code === 1003 || ev.code === 4403) return;
+      setStatus('Disconnected — reconnecting…');
+      overlay.classList.remove('hidden');
+      setTimeout(connect, 1500);
+    };
+    ws.onerror = () => {};
+  }
+
+  function tryStart() {
+    if (started) return;
+    video.play().then(() => {
+      started = true;
+      overlay.classList.add('hidden');
+    }).catch(() => {
+      needsGesture = true;
+      setStatus('Stream ready.');
+      startBtn.style.display = 'inline-block';
+    });
+  }
+
+  startBtn.onclick = () => { startBtn.style.display = 'none'; video.muted = false; tryStart(); };
+  codeInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { code = codeInput.value; connect(); } });
+
+  setInterval(() => {
+    keepLive();
+    const now = performance.now();
+    if (now - lastLog >= 1000 && started) {
+      const s = (now - lastLog) / 1000;
+      hud.textContent = Math.round(frames / s) + ' fps · ' + (bytes * 8 / s / 1e6).toFixed(1) + ' Mbps · buffer ' + (sb && sb.buffered.length ? (sb.buffered.end(sb.buffered.length - 1) - video.currentTime).toFixed(2) : '0') + ' s';
+      frames = 0; bytes = 0; lastLog = now;
+    }
+  }, 250);
+
+  document.addEventListener('dblclick', () => { if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen().catch(() => {}); });
+
+  fetchInfo().then((info) => {
+    if (info && info.requireCode && !code) { codeBox.style.display = 'block'; setStatus('Enter the code shown in AirWing'); codeInput.focus(); return; }
+    connect();
+  });
+})();
+</script>
+</body>
+</html>
