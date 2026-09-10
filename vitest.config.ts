@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 
 export default defineConfig({
   test: {
-    include: ['tests/unit/**/*.test.ts'],
+    include: ['tests/unit/**/*.test.ts', 'tests/live/**/*.test.ts'],
     environment: 'node',
     testTimeout: 20000,
     hookTimeout: 20000,

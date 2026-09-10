@@ -1,9 +1,14 @@
 /**
  * Capture + encode pipeline (runs in the renderer, where WebCodecs and screen capture live).
  *
- *   getDisplayMedia / media file  ->  MediaStreamTrackProcessor  ->  (scale/crop on canvas)
+ *   getDisplayMedia / media file  ->  MediaStreamTrackProcessor  ->  latest-frame slot
+ *   -> wall-clock pacer (constant frame rate, repeats unchanged frames, scale/crop on canvas)
  *   -> VideoEncoder (H.264, hardware when available) + AudioEncoder (AAC or Opus)
  *   -> Fmp4Muxer (one fragment per sample) -> IPC to the main process StreamHub
+ *
+ * All timestamps are generated here on one clock: video from the pacer grid, audio from a
+ * sample counter anchored to the same clock. Chromium's capture timestamps are not used
+ * because screen and loopback-audio tracks do not share a time base.
  */
 
 import { Fmp4Muxer, avcCodecString, type FragmentInfo } from '@shared/fmp4';
@@ -11,7 +16,6 @@ import type { EncoderInfo, StreamConfig, StreamMeta } from '@shared/types';
 
 export interface PipelineEvents {
   state: (state: { active: boolean; paused: boolean; error?: string }) => void;
-  info: (info: EncoderInfo) => void;
 }
 
 const RESOLUTION_LIMITS: Record<string, number> = {
@@ -23,7 +27,7 @@ const RESOLUTION_LIMITS: Record<string, number> = {
   '480p': 480,
 };
 
-function pickBitrate(width: number, height: number, fps: number, quality: StreamConfig['quality'], custom?: number): number {
+export function pickBitrate(width: number, height: number, fps: number, quality: StreamConfig['quality'], custom?: number): number {
   if (custom && custom > 0) return custom;
   const pixelsPerSec = width * height * fps;
   // bits per pixel tuned for screen content (sharp text needs more than camera video).
@@ -36,12 +40,19 @@ function even(n: number): number {
   return Math.max(2, Math.floor(n / 2) * 2);
 }
 
-function avcLevelFor(width: number, height: number, fps: number): string {
+export function avcLevelFor(width: number, height: number, fps: number): string {
   const mbps = (width * height * fps) / 256; // macroblocks per second
   if (mbps <= 245760 && width * height <= 2097152) return '28'; // 4.0
   if (mbps <= 522240) return '2A'; // 4.2
   if (mbps <= 983040) return '33'; // 5.1
   return '34'; // 5.2
+}
+
+function bufferOf(d: AllowSharedBufferSource | undefined): Uint8Array | null {
+  if (!d) return null;
+  if (d instanceof ArrayBuffer) return new Uint8Array(d.slice(0));
+  const v = d as ArrayBufferView;
+  return new Uint8Array(v.buffer.slice(v.byteOffset, v.byteOffset + v.byteLength));
 }
 
 export class CapturePipeline {
@@ -58,21 +69,25 @@ export class CapturePipeline {
   private running = false;
   private stopping = false;
   paused = false;
+  private latestFrame: VideoFrame | null = null;
   private heldFrame: VideoFrame | null = null;
+  private pacer: number | null = null;
+  private startMs = 0;
+  private lastTick = -1;
   private keyframeRequested = true;
-  private lastKeyframeUs = 0;
-  private lastEncodedUs = -Infinity;
-  private gopUs = 2_000_000;
+  private lastKeyframeUs = -Infinity;
+  private gopUs = 1_000_000;
   private frameIntervalUs = 33333;
   private dropped = 0;
   private encoded = 0;
-  private pendingVideo: Array<{ data: Uint8Array; ts: number; key: boolean; dur?: number }> = [];
+  private pendingVideo: Array<{ data: Uint8Array; ts: number; key: boolean; dur: number }> = [];
   private pendingAudio: Array<{ data: Uint8Array; ts: number; dur: number }> = [];
   private videoDesc: Uint8Array | null = null;
   private audioDesc: Uint8Array | null | undefined = undefined;
   private audioCodec: 'aac' | 'opus' | null = null;
   private audioSampleRate = 48000;
   private audioChannels = 2;
+  private audioNextUs = -1;
   private videoCodecString = '';
   private encoderInfo: EncoderInfo | null = null;
   private config: StreamConfig | null = null;
@@ -81,7 +96,6 @@ export class CapturePipeline {
   private audioOnly = false;
   private muxerTimer: number | null = null;
   private statsTimer: number | null = null;
-  private lastPausedTs = 0;
 
   constructor(
     private readonly send: (data: Uint8Array, info: FragmentInfo) => void,
@@ -97,6 +111,10 @@ export class CapturePipeline {
     return { dropped: this.dropped, encoded: this.encoded };
   }
 
+  private nowUs(): number {
+    return Math.round((performance.now() - this.startMs) * 1000);
+  }
+
   async start(config: StreamConfig): Promise<void> {
     if (this.running) await this.stop();
     this.config = config;
@@ -108,16 +126,20 @@ export class CapturePipeline {
     this.videoDesc = null;
     this.audioDesc = undefined;
     this.audioCodec = null;
+    this.audioNextUs = -1;
+    this.encoderInfo = null;
     this.muxer = null;
     this.paused = false;
     this.keyframeRequested = true;
-    this.lastEncodedUs = -Infinity;
+    this.lastKeyframeUs = -Infinity;
+    this.lastTick = -1;
     this.audioOnly = config.sourceKind === 'audio';
-    this.gopUs = config.latency === 'lowest' ? 1_000_000 : config.latency === 'quality' ? 4_000_000 : 2_000_000;
+    this.gopUs = config.latency === 'lowest' ? 500_000 : config.latency === 'quality' ? 2_000_000 : 1_000_000;
     this.frameIntervalUs = Math.round(1e6 / config.frameRate);
     try {
       this.stream = await this.acquireStream(config);
       this.running = true;
+      this.startMs = performance.now();
       const videoTrack = this.stream.getVideoTracks()[0];
       const audioTrack = this.stream.getAudioTracks()[0];
       if (!this.audioOnly && !videoTrack) throw new Error('no video track available');
@@ -126,10 +148,7 @@ export class CapturePipeline {
       if (audioTrack && (config.audio || this.audioOnly)) await this.setupAudio(audioTrack, config);
       else this.audioDesc = null;
       for (const t of this.stream.getTracks()) t.addEventListener('ended', () => void this.stop('capture source ended'));
-      if (this.audioOnly && videoTrack) {
-        // Keep the loopback alive but discard video frames.
-        videoTrack.enabled = false;
-      }
+      if (this.audioOnly && videoTrack) videoTrack.enabled = false;
       this.muxerTimer = window.setTimeout(() => this.ensureMuxer(true), 2500);
       this.statsTimer = window.setInterval(() => this.onState({ active: this.running, paused: this.paused }), 2000);
       this.onState({ active: true, paused: false });
@@ -172,7 +191,7 @@ export class CapturePipeline {
     const src = ctx.createMediaElementSource(el);
     const dest = ctx.createMediaStreamDestination();
     src.connect(dest); // not connected to ctx.destination -> no local playback
-    const captured = (el as any).captureStream ? (el as any).captureStream() : (el as any).mozCaptureStream();
+    const captured: MediaStream = (el as any).captureStream ? (el as any).captureStream() : (el as any).mozCaptureStream();
     const stream = new MediaStream([...captured.getVideoTracks(), ...dest.stream.getAudioTracks()]);
     await el.play();
     el.onended = () => void this.stop('media playback finished');
@@ -192,6 +211,8 @@ export class CapturePipeline {
     return { position: this.mediaEl.currentTime, duration: this.mediaEl.duration || 0 };
   }
 
+  // ------------------------------------------------------------------------ video
+
   private async setupVideo(track: MediaStreamTrack, config: StreamConfig): Promise<void> {
     const s = track.getSettings();
     let srcW = s.width ?? 1920;
@@ -205,8 +226,7 @@ export class CapturePipeline {
     const limit = RESOLUTION_LIMITS[config.resolution] ?? 1080;
     const scale = Math.min(1, limit / Math.min(srcW, srcH), 4096 / Math.max(srcW, srcH));
     this.target = { width: even(srcW * scale), height: even(srcH * scale) };
-    const needsCanvas = !!this.crop || scale < 1;
-    if (needsCanvas) {
+    if (this.crop || scale < 1) {
       this.canvas = new OffscreenCanvas(this.target.width, this.target.height);
       this.ctx = this.canvas.getContext('2d', { alpha: false, desynchronized: true });
     }
@@ -262,7 +282,97 @@ export class CapturePipeline {
     const processor = new MediaStreamTrackProcessor<VideoFrame>({ track });
     this.videoReader = processor.readable.getReader();
     void this.videoLoop();
+    this.startPacer();
   }
+
+  /** Keep only the most recent captured frame; the pacer decides when to encode. */
+  private async videoLoop(): Promise<void> {
+    const reader = this.videoReader!;
+    while (this.running) {
+      let result: ReadableStreamReadResult<VideoFrame>;
+      try {
+        result = await reader.read();
+      } catch {
+        break;
+      }
+      if (result.done) break;
+      if (!this.running) {
+        result.value.close();
+        break;
+      }
+      this.latestFrame?.close();
+      this.latestFrame = result.value;
+    }
+    if (this.running && !this.stopping) void this.stop('video capture ended');
+  }
+
+  private startPacer(): void {
+    const intervalMs = this.frameIntervalUs / 1000;
+    this.pacer = window.setInterval(() => this.tick(), Math.max(4, intervalMs / 2));
+  }
+
+  private tick(): void {
+    if (!this.running || !this.videoEncoder || this.videoEncoder.state !== 'configured') return;
+    const nowUs = this.nowUs();
+    const tickIndex = Math.floor(nowUs / this.frameIntervalUs);
+    if (tickIndex <= this.lastTick) return;
+    const source = this.paused ? this.heldFrame ?? this.latestFrame : this.latestFrame;
+    if (!source) return;
+    if (this.videoEncoder.encodeQueueSize > 2) {
+      this.dropped++;
+      this.lastTick = tickIndex;
+      return;
+    }
+    if (this.paused && !this.heldFrame) this.heldFrame = source.clone();
+    if (!this.paused && this.heldFrame) {
+      this.heldFrame.close();
+      this.heldFrame = null;
+    }
+    const ts = tickIndex * this.frameIntervalUs;
+    const durationTicks = this.lastTick < 0 ? 1 : tickIndex - this.lastTick;
+    this.lastTick = tickIndex;
+    let frame: VideoFrame;
+    try {
+      frame = this.render(source, ts, this.paused);
+    } catch (err) {
+      console.warn('render failed', err);
+      return;
+    }
+    const key = this.keyframeRequested || ts - this.lastKeyframeUs >= this.gopUs;
+    if (key) {
+      this.keyframeRequested = false;
+      this.lastKeyframeUs = ts;
+    }
+    (frame as any).__durationUs = durationTicks * this.frameIntervalUs;
+    this.videoEncoder.encode(frame, { keyFrame: key });
+    frame.close();
+  }
+
+  private render(source: VideoFrame, timestamp: number, paused: boolean): VideoFrame {
+    const duration = this.frameIntervalUs;
+    if (!paused && !this.canvas) return new VideoFrame(source, { timestamp, duration });
+    if (!this.canvas) {
+      this.canvas = new OffscreenCanvas(this.target.width, this.target.height);
+      this.ctx = this.canvas.getContext('2d', { alpha: false, desynchronized: true });
+    }
+    const ctx = this.ctx!;
+    const c = this.crop;
+    if (c) ctx.drawImage(source, c.x, c.y, c.width, c.height, 0, 0, this.target.width, this.target.height);
+    else ctx.drawImage(source, 0, 0, this.target.width, this.target.height);
+    if (paused) {
+      const h = Math.max(28, Math.round(this.target.height * 0.06));
+      ctx.fillStyle = 'rgba(0,0,0,0.55)';
+      ctx.fillRect(0, this.target.height - h * 1.6, this.target.width, h * 1.6);
+      ctx.fillStyle = '#fff';
+      ctx.font = `${Math.round(h * 0.8)}px system-ui, sans-serif`;
+      ctx.textBaseline = 'middle';
+      ctx.textAlign = 'center';
+      ctx.fillText('Paused', this.target.width / 2, this.target.height - h * 0.8);
+    }
+    return new VideoFrame(this.canvas, { timestamp, duration });
+  }
+
+  // ------------------------------------------------------------------------ audio
 
   private async setupAudio(track: MediaStreamTrack, config: StreamConfig): Promise<void> {
     const s = track.getSettings();
@@ -275,7 +385,7 @@ export class CapturePipeline {
     ];
     let chosen: AudioEncoderConfig | null = null;
     for (const c of candidates) {
-      const cfg: AudioEncoderConfig = {
+      const cfg = {
         codec: c.codec,
         sampleRate: this.audioSampleRate,
         numberOfChannels: this.audioChannels,
@@ -311,94 +421,6 @@ export class CapturePipeline {
     void this.audioLoop();
   }
 
-  private async videoLoop(): Promise<void> {
-    const reader = this.videoReader!;
-    while (this.running) {
-      let result: ReadableStreamReadResult<VideoFrame>;
-      try {
-        result = await reader.read();
-      } catch {
-        break;
-      }
-      if (result.done) break;
-      const frame = result.value;
-      try {
-        this.handleFrame(frame);
-      } catch (err) {
-        console.error('frame error', err);
-        frame.close();
-      }
-    }
-    if (this.running && !this.stopping) void this.stop('video capture ended');
-  }
-
-  private handleFrame(frame: VideoFrame): void {
-    const encoder = this.videoEncoder;
-    if (!encoder || encoder.state !== 'configured') {
-      frame.close();
-      return;
-    }
-    const ts = frame.timestamp;
-    // Frame-rate limiter.
-    if (ts - this.lastEncodedUs < this.frameIntervalUs * 0.9) {
-      frame.close();
-      return;
-    }
-    if (encoder.encodeQueueSize > 2) {
-      this.dropped++;
-      frame.close();
-      return;
-    }
-    let toEncode: VideoFrame = frame;
-    if (this.paused) {
-      // Hold the last real frame and keep emitting it so receivers show a frozen picture.
-      if (!this.heldFrame) this.heldFrame = frame.clone();
-      toEncode = this.renderHeld(this.heldFrame, ts) ?? frame;
-      if (toEncode !== frame) frame.close();
-    } else {
-      if (this.heldFrame) {
-        this.heldFrame.close();
-        this.heldFrame = null;
-      }
-      if (this.canvas && this.ctx) {
-        const c = this.crop;
-        if (c) this.ctx.drawImage(frame, c.x, c.y, c.width, c.height, 0, 0, this.target.width, this.target.height);
-        else this.ctx.drawImage(frame, 0, 0, this.target.width, this.target.height);
-        toEncode = new VideoFrame(this.canvas, { timestamp: ts, duration: frame.duration ?? undefined });
-        frame.close();
-      }
-    }
-    const key = this.keyframeRequested || ts - this.lastKeyframeUs >= this.gopUs;
-    if (key) {
-      this.keyframeRequested = false;
-      this.lastKeyframeUs = ts;
-    }
-    this.lastEncodedUs = ts;
-    encoder.encode(toEncode, { keyFrame: key });
-    toEncode.close();
-  }
-
-  private renderHeld(held: VideoFrame, ts: number): VideoFrame | null {
-    if (!this.canvas) {
-      this.canvas = new OffscreenCanvas(this.target.width, this.target.height);
-      this.ctx = this.canvas.getContext('2d', { alpha: false, desynchronized: true });
-    }
-    const ctx = this.ctx!;
-    const c = this.crop;
-    if (c) ctx.drawImage(held, c.x, c.y, c.width, c.height, 0, 0, this.target.width, this.target.height);
-    else ctx.drawImage(held, 0, 0, this.target.width, this.target.height);
-    // Paused banner
-    const h = Math.max(28, Math.round(this.target.height * 0.06));
-    ctx.fillStyle = 'rgba(0,0,0,0.55)';
-    ctx.fillRect(0, this.target.height - h * 1.6, this.target.width, h * 1.6);
-    ctx.fillStyle = '#fff';
-    ctx.font = `${Math.round(h * 0.8)}px system-ui, sans-serif`;
-    ctx.textBaseline = 'middle';
-    ctx.textAlign = 'center';
-    ctx.fillText('Paused', this.target.width / 2, this.target.height - h * 0.8);
-    return new VideoFrame(this.canvas, { timestamp: ts });
-  }
-
   private async audioLoop(): Promise<void> {
     const reader = this.audioReader!;
     while (this.running) {
@@ -411,65 +433,72 @@ export class CapturePipeline {
       if (result.done) break;
       const data = result.value;
       const encoder = this.audioEncoder;
-      if (!encoder || encoder.state !== 'configured') {
+      if (!encoder || encoder.state !== 'configured' || !this.running) {
         data.close();
-        continue;
-      }
-      if (this.paused) {
-        // Replace with silence so receivers keep a continuous audio timeline.
-        const frames = data.numberOfFrames;
-        const silent = new AudioData({
-          format: 'f32-planar',
-          sampleRate: data.sampleRate,
-          numberOfFrames: frames,
-          numberOfChannels: data.numberOfChannels,
-          timestamp: data.timestamp,
-          data: new Float32Array(frames * data.numberOfChannels),
-        });
-        data.close();
-        encoder.encode(silent);
-        silent.close();
         continue;
       }
       if (encoder.encodeQueueSize > 8) {
         data.close();
         continue;
       }
-      encoder.encode(data);
+      const frames = data.numberOfFrames;
+      const channels = data.numberOfChannels;
+      const sr = data.sampleRate;
+      if (sr !== this.audioSampleRate || channels !== this.audioChannels) {
+        // Track settings changed after configure; keep encoding with the configured layout.
+        this.audioSampleRate = sr;
+        this.audioChannels = channels;
+      }
+      // Restamp on our clock: contiguous sample counter, resynced to wall time if it drifts > 80 ms.
+      const wall = this.nowUs();
+      if (this.audioNextUs < 0 || Math.abs(this.audioNextUs - wall) > 80_000) this.audioNextUs = wall;
+      const timestamp = this.audioNextUs;
+      this.audioNextUs += Math.round((frames * 1e6) / sr);
+      const planar = new Float32Array(frames * channels);
+      if (!this.paused) {
+        try {
+          if (data.format === 'f32-planar') {
+            for (let ch = 0; ch < channels; ch++) data.copyTo(planar.subarray(ch * frames, (ch + 1) * frames), { planeIndex: ch });
+          } else {
+            // Convert whatever the capturer gives us (usually f32 interleaved) to planar.
+            const interleaved = new Float32Array(frames * channels);
+            data.copyTo(interleaved, { planeIndex: 0, format: 'f32' });
+            for (let ch = 0; ch < channels; ch++) for (let i = 0; i < frames; i++) planar[ch * frames + i] = interleaved[i * channels + ch];
+          }
+        } catch (err) {
+          console.warn('audio copy failed', err);
+        }
+      }
       data.close();
+      const restamped = new AudioData({ format: 'f32-planar', sampleRate: sr, numberOfFrames: frames, numberOfChannels: channels, timestamp, data: planar });
+      encoder.encode(restamped);
+      restamped.close();
     }
   }
 
+  // ------------------------------------------------------------------------ encoder output
+
   private onVideoChunk(chunk: EncodedVideoChunk, meta?: EncodedVideoChunkMetadata): void {
     if (!this.running) return;
-    if (meta?.decoderConfig?.description && !this.videoDesc) {
-      const d = meta.decoderConfig.description;
-      this.videoDesc = new Uint8Array(d instanceof ArrayBuffer ? d : (d as ArrayBufferView).buffer.slice((d as ArrayBufferView).byteOffset, (d as ArrayBufferView).byteOffset + (d as ArrayBufferView).byteLength));
-    }
+    if (meta?.decoderConfig?.description && !this.videoDesc) this.videoDesc = bufferOf(meta.decoderConfig.description);
     const data = new Uint8Array(chunk.byteLength);
     chunk.copyTo(data);
     this.encoded++;
-    const sample = { data, ts: chunk.timestamp, key: chunk.type === 'key', dur: chunk.duration ?? undefined };
+    const dur = chunk.duration && chunk.duration > 0 ? chunk.duration : this.frameIntervalUs;
+    const sample = { data, ts: chunk.timestamp, key: chunk.type === 'key', dur };
     if (!this.muxer) {
       this.pendingVideo.push(sample);
       if (this.pendingVideo.length > 120) this.pendingVideo.shift();
       this.ensureMuxer(false);
       return;
     }
-    this.muxer.addVideoSample(sample.data, sample.ts, sample.key, undefined);
+    this.muxer.addVideoSample(sample.data, sample.ts, sample.key, sample.dur);
   }
 
   private onAudioChunk(chunk: EncodedAudioChunk, meta?: EncodedAudioChunkMetadata): void {
     if (!this.running) return;
     if (this.audioDesc === undefined) {
-      const d = meta?.decoderConfig?.description;
-      if (d) {
-        this.audioDesc = new Uint8Array(d instanceof ArrayBuffer ? d : (d as ArrayBufferView).buffer.slice((d as ArrayBufferView).byteOffset, (d as ArrayBufferView).byteOffset + (d as ArrayBufferView).byteLength));
-      } else if (this.audioCodec === 'opus') {
-        this.audioDesc = null;
-      } else {
-        this.audioDesc = null; // AAC without ASC: muxer builds a default one
-      }
+      this.audioDesc = bufferOf(meta?.decoderConfig?.description) ?? null;
       if (meta?.decoderConfig?.sampleRate) this.audioSampleRate = meta.decoderConfig.sampleRate;
       if (meta?.decoderConfig?.numberOfChannels) this.audioChannels = meta.decoderConfig.numberOfChannels;
     }
@@ -517,7 +546,7 @@ export class CapturePipeline {
     const startTs = video[0]?.ts ?? this.pendingAudio[0]?.ts ?? 0;
     const audio = includeAudio ? this.pendingAudio.filter((a) => a.ts >= startTs - 50_000) : [];
     const merged = [
-      ...video.map((v) => ({ ts: v.ts, run: () => this.muxer!.addVideoSample(v.data, v.ts, v.key, undefined) })),
+      ...video.map((v) => ({ ts: v.ts, run: () => this.muxer!.addVideoSample(v.data, v.ts, v.key, v.dur) })),
       ...audio.map((a) => ({ ts: a.ts, run: () => this.muxer!.addAudioSample(a.data, a.ts, a.dur) })),
     ].sort((a, b) => a.ts - b.ts);
     for (const m of merged) m.run();
@@ -549,6 +578,8 @@ export class CapturePipeline {
     this.stopping = true;
     const wasRunning = this.running;
     this.running = false;
+    if (this.pacer) clearInterval(this.pacer);
+    this.pacer = null;
     if (this.muxerTimer) clearTimeout(this.muxerTimer);
     if (this.statsTimer) clearInterval(this.statsTimer);
     this.muxerTimer = null;
@@ -587,6 +618,8 @@ export class CapturePipeline {
     this.audioEncoder = null;
     this.muxer?.flush();
     this.muxer = null;
+    this.latestFrame?.close();
+    this.latestFrame = null;
     this.heldFrame?.close();
     this.heldFrame = null;
     if (this.mediaEl) {

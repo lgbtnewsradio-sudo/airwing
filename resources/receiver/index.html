@@ -95,8 +95,9 @@
   function keepLive() {
     if (!sb || !sb.buffered.length) return;
     const end = sb.buffered.end(sb.buffered.length - 1);
+    const start = sb.buffered.start(sb.buffered.length - 1);
     const lag = end - video.currentTime;
-    if (lag > 1.0) { video.currentTime = end - 0.15; }
+    if (video.currentTime < start || lag > 1.0) { video.currentTime = Math.max(start, end - 0.15); }
     else if (lag > 0.4) video.playbackRate = 1.05;
     else video.playbackRate = 1.0;
     if (video.paused && started) video.play().catch(() => {});
@@ -150,13 +151,16 @@
 
   function tryStart() {
     if (started) return;
+    if (!sb || !sb.buffered.length) return;
     video.play().then(() => {
       started = true;
       overlay.classList.add('hidden');
-    }).catch(() => {
-      needsGesture = true;
-      setStatus('Stream ready.');
-      startBtn.style.display = 'inline-block';
+    }).catch((err) => {
+      if (err && err.name === 'NotAllowedError') {
+        needsGesture = true;
+        setStatus('Stream ready.');
+        startBtn.style.display = 'inline-block';
+      }
     });
   }
 
@@ -175,6 +179,7 @@
 
   document.addEventListener('dblclick', () => { if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen().catch(() => {}); });
 
+  window.__aw = { get ms() { return ms; }, get sb() { return sb; }, get queue() { return queue; }, get meta() { return meta; }, get started() { return started; }, get needsGesture() { return needsGesture; }, video };
   fetchInfo().then((info) => {
     if (info && info.requireCode && !code) { codeBox.style.display = 'block'; setStatus('Enter the code shown in AirWing'); codeInput.focus(); return; }
     connect();

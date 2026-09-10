@@ -40,6 +40,9 @@ import { LocalServer } from './server';
 import { SessionManager } from './sessions';
 import { localAddresses, preferredAddress } from './net';
 
+const userDataArg = process.argv.find((a) => a.startsWith('--user-data-dir='));
+if (userDataArg) app.setPath('userData', userDataArg.slice('--user-data-dir='.length));
+
 const isDev = !app.isPackaged;
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
