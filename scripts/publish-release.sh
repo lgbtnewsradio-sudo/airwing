@@ -12,16 +12,12 @@ API="https://api.github.com/repos/${REPO}"
 AUTH=(-H "Authorization: token ${TOKEN}" -H "Accept: application/vnd.github+json")
 
 NOTES_FILE="${NOTES_FILE:-RELEASE_NOTES.md}"
-if [ -f "$NOTES_FILE" ]; then
-  BODY="$(node -e "process.stdout.write(JSON.stringify(require('fs').readFileSync(process.argv[1],'utf8')))" "$NOTES_FILE")"
-else
-  BODY="\"AirWing ${VERSION}\""
-fi
+node -e "const fs=require('fs');const [tag,name,notes]=process.argv.slice(1);const body=fs.existsSync(notes)?fs.readFileSync(notes,'utf8'):name;fs.writeFileSync('release/payload.json',JSON.stringify({tag_name:tag,name,body,draft:false,prerelease:false}))" "$TAG" "AirWing ${VERSION}" "$NOTES_FILE"
 
 RELEASE_JSON="$(curl -s "${AUTH[@]}" "${API}/releases/tags/${TAG}" || true)"
 RELEASE_ID="$(node -e "try{const j=JSON.parse(process.argv[1]);process.stdout.write(String(j.id||''))}catch{}" "$RELEASE_JSON")"
 if [ -z "$RELEASE_ID" ]; then
-  RELEASE_JSON="$(curl -s "${AUTH[@]}" "${API}/releases" -d "{\"tag_name\":\"${TAG}\",\"name\":\"AirWing ${VERSION}\",\"body\":${BODY},\"draft\":false,\"prerelease\":false}")"
+  RELEASE_JSON="$(curl -s "${AUTH[@]}" "${API}/releases" -d @release/payload.json)"
   RELEASE_ID="$(node -e "const j=JSON.parse(process.argv[1]);if(!j.id){console.error(j);process.exit(1)}process.stdout.write(String(j.id))" "$RELEASE_JSON")"
   echo "created release ${TAG} (id ${RELEASE_ID})"
 else
