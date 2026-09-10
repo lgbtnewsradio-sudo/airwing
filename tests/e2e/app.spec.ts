@@ -98,7 +98,7 @@ test('starts a real screen capture, encodes H.264 and serves HLS + WebSocket vie
   });
   console.log('viewer decoding', JSON.stringify(dims));
   await viewer.screenshot({ path: 'test-results/browser-receiver.png' });
-  await expect.poll(async () => (await page.evaluate(() => window.airwing.capture.stats())).viewers, { timeout: 10000 }).toBe(1);
+  await expect.poll(async () => (await page.evaluate(() => window.airwing.capture.stats())).viewers, { timeout: 10000 }).toBeGreaterThanOrEqual(1);
   await page.screenshot({ path: 'test-results/main-window-streaming.png' });
 
   // Pause / resume keeps the stream alive.

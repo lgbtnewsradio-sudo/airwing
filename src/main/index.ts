@@ -64,7 +64,8 @@ const userData = app.getPath('userData');
 const settings = new SettingsStore(userData);
 const credentials = new CredentialStore(userData);
 const hub = new StreamHub();
-const resourcesDir = isDev ? join(process.cwd(), 'resources') : join(process.resourcesPath, 'resources');
+// In a packaged build the resources folder ships inside app.asar; Electron's fs reads it transparently.
+const resourcesDir = app.isPackaged ? join(app.getAppPath(), 'resources') : join(process.cwd(), 'resources');
 const server = new LocalServer({
   port: settings.get().serverPort,
   bindAddress: settings.get().bindAddress,
@@ -79,6 +80,15 @@ const sessions = new SessionManager({ hub, server, credentials, senderName: () =
 /** Current capture request (set by the renderer before calling getDisplayMedia). */
 let pendingCapture: { sourceId: string; audio: boolean; muteLocal: boolean } | null = null;
 let currentConfig: StreamConfig | null = null;
+
+function appVersion(): string {
+  if (app.isPackaged) return app.getVersion();
+  try {
+    return JSON.parse(require('node:fs').readFileSync(join(process.cwd(), 'package.json'), 'utf8')).version ?? app.getVersion();
+  } catch {
+    return app.getVersion();
+  }
+}
 
 function senderName(): string {
   return settings.get().deviceName || `AirWing on ${require('node:os').hostname()}`;
@@ -483,7 +493,7 @@ function registerIpc(): void {
     const media = server.registerMedia(path);
     return { path, name: media.name, mime: media.mime, size: media.size, url: server.mediaUrl('127.0.0.1', media) };
   });
-  ipcMain.handle(IPC.appVersion, () => app.getVersion());
+  ipcMain.handle(IPC.appVersion, () => appVersion());
   ipcMain.handle(IPC.appOpenExternal, (_e, url: string) => shell.openExternal(url));
   ipcMain.handle(IPC.appQuit, () => quitApp());
   ipcMain.handle(IPC.logList, () => log.list());
@@ -569,12 +579,14 @@ function quitApp(): void {
 app.on('second-instance', () => showWindow());
 
 app.whenReady().then(async () => {
-  log.info('app', `AirWing ${app.getVersion()} starting (electron ${process.versions.electron}, chrome ${process.versions.chrome})`);
+  log.info('app', `AirWing ${appVersion()} starting (electron ${process.versions.electron}, chrome ${process.versions.chrome})`);
   installDisplayMediaHandler();
   registerIpc();
   wireRemote();
   try {
     await server.start();
+    const addr = preferredAddress();
+    log.info('server', `browser receiver: ${server.receiverUrl(addr)}  phone remote: ${server.remoteUrl(addr)}`);
   } catch (err) {
     log.error('server', err as Error);
   }

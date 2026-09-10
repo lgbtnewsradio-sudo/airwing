@@ -49,7 +49,7 @@ describe('local server + stream hub', () => {
     expect(html).toContain('AirWing receiver');
     const remote = await (await fetch(base + '/remote')).text();
     expect(remote).toContain('remote');
-    const info = await (await fetch(base + '/api/info')).json();
+    const info: any = await (await fetch(base + '/api/info')).json();
     expect(info).toMatchObject({ name: 'Test PC', streaming: false, hlsReady: false });
   });
 
@@ -69,7 +69,7 @@ describe('local server + stream hub', () => {
     const init = await fetch(base + '/hls/init.mp4');
     expect(init.status).toBe(200);
     expect(Buffer.from(await init.arrayBuffer()).subarray(4, 8).toString()).toBe('ftyp');
-    const info = await (await fetch(base + '/api/info')).json();
+    const info: any = await (await fetch(base + '/api/info')).json();
     expect(info.streaming).toBe(true);
     expect(info.codecs).toBe('avc1.640028,mp4a.40.2');
   });

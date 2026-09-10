@@ -189,11 +189,6 @@ export function App() {
     await api.capture.pause(!captureState.paused);
   }, [api, captureState.paused]);
 
-  useEffect(() => {
-    if (!captureState.active) return;
-    if (sessions.length === 0 && !stats?.viewers && !pipeline.active) return;
-  }, [captureState.active, sessions.length, stats?.viewers, pipeline.active]);
-
   if (!settings) {
     return <div className="loading">Loading AirWing…</div>;
   }

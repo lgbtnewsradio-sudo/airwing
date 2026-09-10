@@ -89,6 +89,9 @@ export class StreamHub extends EventEmitter {
     this.active = false;
     this.paused = false;
     this.segmenter.flush();
+    this.segmenter.reset();
+    this.init = null;
+    this.gop = [];
     log.info('stream', 'stream ended');
     this.emit('end');
   }

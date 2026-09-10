@@ -94,7 +94,7 @@ export class MockAirPlayReceiver {
   }
 
   private handleConnection(sock: net.Socket): void {
-    let rx = Buffer.alloc(0);
+    let rx: Buffer = Buffer.alloc(0);
     let framer: HapFramer | null = null;
     let srp: HapSrpServer | null = null;
     let transient = false;
@@ -110,7 +110,7 @@ export class MockAirPlayReceiver {
       if (cseq) lines.push(`CSeq: ${cseq}`);
       for (const [k, v] of Object.entries(headers)) lines.push(`${k}: ${v}`);
       lines.push(`Content-Length: ${body?.length ?? 0}`, '', '');
-      let out = Buffer.concat([Buffer.from(lines.join('\r\n')), body ?? Buffer.alloc(0)]);
+      let out: Buffer = Buffer.concat([Buffer.from(lines.join('\r\n')), body ?? Buffer.alloc(0)]);
       if (framer) out = framer.encrypt(out);
       sock.write(out);
       if (pendingKeys) {

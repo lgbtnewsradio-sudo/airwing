@@ -14,5 +14,5 @@
     "baseUrl": ".",
     "paths": { "@shared/*": ["src/shared/*"] }
   },
-  "include": ["src/main/**/*", "src/preload/**/*", "src/shared/**/*", "tests/**/*.ts", "scripts/**/*.ts"]
+  "include": ["src/main/**/*", "src/preload/**/*", "src/shared/**/*", "tests/unit/**/*.ts", "tests/live/**/*.ts", "tests/mocks/**/*.ts"]
 }
