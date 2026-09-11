@@ -61,6 +61,7 @@ let tray: Tray | null = null;
 let quitting = false;
 
 const userData = app.getPath('userData');
+log.setFile(join(userData, 'logs', 'airwing.log'));
 const settings = new SettingsStore(userData);
 const credentials = new CredentialStore(userData);
 const hub = new StreamHub();

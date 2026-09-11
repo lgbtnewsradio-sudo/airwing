@@ -38,7 +38,7 @@ Grab `AirWing-<version>-win-x64.exe` (installer) or the portable `.zip` from the
 Silent install for managed rollouts:
 
 ```bash
-AirWing-1.0.0-win-x64.exe /S
+AirWing-1.0.1-win-x64.exe /S
 ```
 
 Settings live in `%APPDATA%\AirWing\settings.json`; AirPlay pairing keys in `credentials.json` beside it.
@@ -102,6 +102,8 @@ The mock receivers under `tests/mocks` speak the real wire protocols (HAP SRP/Ed
 * **Extend Desktop** relies on a third-party virtual display driver because Windows requires a signed IddCx driver to create displays.
 * The AirPlay 2 implementation was validated against mock receivers and a HomePod mini/Apple TV on a home network; other brands may need tweaks — please open an issue with the `Logs` tab output.
 * Windows Firewall must allow AirWing on private networks so receivers can fetch the stream.
+* Electron's Node runtime (BoringSSL) lacks ChaCha20-Poly1305, so AirWing ships its own RFC 8439 implementation for HAP pairing and transport encryption; the crypto tests are also run under Electron's runtime (`ELECTRON_RUN_AS_NODE=1 electron node_modules/vitest/vitest.mjs run`).
+* Diagnostics: the Logs tab plus `%APPDATA%AirWinglogsairwing.log`.
 
 ## Project layout
 

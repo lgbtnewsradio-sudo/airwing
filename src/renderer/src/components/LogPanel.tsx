@@ -14,6 +14,9 @@ export function LogPanel({ logs }: { logs: LogEvent[] }) {
           Copy
         </button>
       </div>
+      <p className="hint">
+        A full log (including protocol traces) is written to <code>%APPDATA%\AirWing\logs\airwing.log</code>. Attach it when reporting a problem.
+      </p>
       <div className="log" ref={ref}>
         {logs.map((l, i) => (
           <div key={i} className={`log-line ${l.level}`}>

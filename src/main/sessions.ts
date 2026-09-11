@@ -205,10 +205,18 @@ export class SessionManager extends EventEmitter {
 
   async finishPairing(device: Device, pin: string): Promise<void> {
     const client = this.pairingClients.get(device.id);
-    if (!client) throw new Error('pairing was not started');
+    if (!client) {
+      // The previous attempt was consumed (rejected code or closed connection). Ask the
+      // receiver for a fresh code so the caller can simply prompt again.
+      await this.startPairing(device);
+      throw new Error('the previous pairing code expired');
+    }
     try {
       await client.finishPairing(pin);
       log.info('session', `${device.name}: paired successfully`);
+    } catch (err) {
+      log.warn('session', `${device.name}: pairing failed: ${(err as Error).message}`);
+      throw err;
     } finally {
       client.close();
       this.pairingClients.delete(device.id);

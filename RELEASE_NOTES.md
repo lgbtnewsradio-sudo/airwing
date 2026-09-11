@@ -1,29 +1,15 @@
-## AirWing 1.0.0
+## AirWing 1.0.1
 
-First release. An open-source AirParrot alternative for Windows 10/11.
+Bug-fix release for AirPlay 2 pairing.
 
-**Mirroring**
-- Entire display, single app window, or a drag-selected screen region
-- 480p to 4K, 15–60 fps, hardware H.264 (Media Foundation) with AAC system audio, optional local mute
-- Pause without disconnecting (frozen frame + banner), configurable global hotkeys, tray quick-connect
-- Stream to any number of receivers at once from a single encode
+**Fixed**
+- **Pairing with Apple TV, Roku, Fire TV and other code-protected AirPlay 2 receivers failed after entering the code** ("Unknown cipher"). Electron's Node runtime is built on BoringSSL, which does not expose ChaCha20-Poly1305 through the crypto API, so the encrypted M5/M6 pairing steps (and the encrypted control channel) could not run inside the packaged app even though they passed in the Node-based test suite. AirWing now ships its own RFC 8439 ChaCha20-Poly1305 implementation, verified against the RFC test vectors and Node's native cipher, and the pairing/transport tests are run under Electron's runtime in CI.
+- **"pairing was not started" when pressing Pair a second time.** A rejected or expired code invalidates the receiver's pairing session; the dialog now automatically requests a fresh code from the receiver, clears the field and explains what happened. The backend also re-arms pairing if a stale submit arrives.
 
-**Receivers**
-- Apple TV, HomePod, Roku, Fire TV and other AirPlay 2 receivers (HAP pairing with on-screen code or transient pairing, encrypted control channel)
-- Reflector and AirPlay 1 receivers
-- Chromecast / Google TV / Nest speakers (Google Cast v2, live fMP4 HLS)
-- Any web browser via the built-in low-latency receiver page; phone remote page for couch control
-- Connect by IP address for receivers on other subnets; favourites and recents
-
-**Media**
-- Stream files directly to the receiver (MP4/M4V/MOV/MP3/M4A/AAC/WAV) with play/pause/seek/volume
-- Transcode anything Chromium can decode (MKV, WebM, AVI, FLAC, OGG…) into a live stream
-
-**Extend desktop**
-- Guided setup with the open-source Virtual Display Driver; virtual displays appear as mirror sources
+**Added**
+- Full log file at `%APPDATA%\AirWing\logs\airwing.log` (rotated at 5 MB) with protocol traces, for bug reports.
+- End-to-end UI test that pairs against a mock AirPlay 2 receiver inside the real Electron app, including the wrong-code path.
 
 **Downloads**
-- `AirWing-1.0.0-win-x64.exe` — installer (supports silent `/S` install)
-- `AirWing-1.0.0-win-x64.zip` — portable
-
-Verified on a real network against a HomePod mini (AirPlay 2 transient pairing, encrypted session, SETUP/RECORD) and with mock AirPlay 2 / Cast receivers in the test suite. Apple TV, Roku and Fire TV require entering the on-screen code once.
+- `AirWing-1.0.1-win-x64.exe` — installer (supports silent `/S` install)
+- `AirWing-1.0.1-win-x64.zip` — portable

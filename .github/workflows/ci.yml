@@ -17,6 +17,11 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      - name: Crypto + AirPlay tests under Electron runtime (BoringSSL)
+        run: node_modules/electron/dist/electron.exe node_modules/vitest/vitest.mjs run tests/unit/crypto.test.ts tests/unit/chacha.test.ts tests/unit/airplay.test.ts
+        shell: bash
+        env:
+          ELECTRON_RUN_AS_NODE: 1
       - run: npm run build
       - name: End-to-end (real capture + encode on the runner)
         run: npx playwright test

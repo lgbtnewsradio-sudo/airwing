@@ -13,10 +13,9 @@ import {
   randomBytes,
   sign,
   verify,
-  createCipheriv,
-  createDecipheriv,
   type KeyObject,
 } from 'node:crypto';
+import { aeadDecrypt, aeadEncrypt } from './chacha20poly1305';
 import { SRP, SrpClient, SrpServer } from 'fast-srp-hap';
 
 const ED25519_PKCS8_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
@@ -90,21 +89,14 @@ export function hapNonce(counterOrTag: number | Buffer): Buffer {
   return nonce;
 }
 
+// ChaCha20-Poly1305 is implemented in TypeScript because Electron's BoringSSL-based
+// node:crypto does not provide the cipher (createCipheriv throws "Unknown cipher").
 export function chachaEncrypt(key: Buffer, nonce: Buffer, plaintext: Buffer, aad?: Buffer): Buffer {
-  const cipher = createCipheriv('chacha20-poly1305', key, nonce, { authTagLength: 16 });
-  if (aad) cipher.setAAD(aad, { plaintextLength: plaintext.length });
-  const enc = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-  return Buffer.concat([enc, cipher.getAuthTag()]);
+  return Buffer.from(aeadEncrypt(key, nonce, plaintext, aad ?? new Uint8Array(0)));
 }
 
 export function chachaDecrypt(key: Buffer, nonce: Buffer, ciphertextWithTag: Buffer, aad?: Buffer): Buffer {
-  if (ciphertextWithTag.length < 16) throw new Error('ciphertext too short');
-  const tag = ciphertextWithTag.subarray(ciphertextWithTag.length - 16);
-  const body = ciphertextWithTag.subarray(0, ciphertextWithTag.length - 16);
-  const decipher = createDecipheriv('chacha20-poly1305', key, nonce, { authTagLength: 16 });
-  if (aad) decipher.setAAD(aad, { plaintextLength: body.length });
-  decipher.setAuthTag(tag);
-  return Buffer.concat([decipher.update(body), decipher.final()]);
+  return Buffer.from(aeadDecrypt(key, nonce, ciphertextWithTag, aad ?? new Uint8Array(0)));
 }
 
 /**
