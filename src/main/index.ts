@@ -219,6 +219,27 @@ function sendCaptureCommand(cmd: CaptureCommand): void {
   send(IPC.captureCommand, cmd);
 }
 
+let captureRestarts = 0;
+let restartTimer: NodeJS.Timeout | null = null;
+
+/** Bring capture back after it ended unexpectedly, as long as someone is still watching. */
+function maybeRestartCapture(reason: string): void {
+  if (restartTimer || quitting) return;
+  const watchers = sessions.count + server.viewerCount;
+  if (watchers === 0 || !currentConfig) return;
+  if (captureRestarts >= 5) {
+    log.error('capture', `capture keeps stopping (${reason}); giving up after ${captureRestarts} restarts`);
+    return;
+  }
+  captureRestarts++;
+  const delay = Math.min(4000, 400 * captureRestarts);
+  log.warn('capture', `capture ended (${reason}); restarting in ${delay} ms for ${watchers} watcher(s), attempt ${captureRestarts}`);
+  restartTimer = setTimeout(() => {
+    restartTimer = null;
+    if (!quitting && currentConfig && !hub.active) sendCaptureCommand({ type: 'start', config: currentConfig });
+  }, delay);
+}
+
 function togglePause(): void {
   if (!hub.active) return;
   sendCaptureCommand({ type: 'pause', paused: !hub.paused });
@@ -271,6 +292,7 @@ async function listSources(): Promise<CaptureSource[]> {
         appIcon: s.appIcon && !s.appIcon.isEmpty() ? s.appIcon.toDataURL() : undefined,
         displayId: s.display_id || undefined,
         bounds: display?.bounds,
+        size: display ? { width: Math.round(display.size.width * display.scaleFactor), height: Math.round(display.size.height * display.scaleFactor) } : undefined,
         isVirtualDisplay: display ? isVirtualDisplay(display) : false,
       } satisfies CaptureSource;
     });
@@ -429,11 +451,20 @@ function registerIpc(): void {
     const buf = Buffer.isBuffer(data) ? data : Buffer.from(data instanceof Uint8Array ? data.buffer : data, data instanceof Uint8Array ? data.byteOffset : 0, data.byteLength);
     hub.push(buf, info);
   });
-  ipcMain.on(IPC.streamState, (_e, state: { active: boolean; paused: boolean; dropped?: number; error?: string }) => {
+  ipcMain.on(IPC.streamState, (_e, state: { active: boolean; paused: boolean; dropped?: number; error?: string; reason?: string }) => {
     if (state.error) log.error('capture', state.error);
+    else if (state.reason && !state.active) log.info('capture', `capture stopped: ${state.reason}`);
     if (typeof state.dropped === 'number') hub.reportDropped(state.dropped);
     if (!state.active && hub.active) hub.end();
-    if (state.active && hub.paused !== state.paused) hub.setPaused(state.paused);
+    if (state.active) {
+      captureRestarts = 0;
+      if (hub.paused !== state.paused) hub.setPaused(state.paused);
+    } else if (state.reason && state.reason !== 'stopped by request') {
+      // Windows can end a capture on its own (display change, session switch, a source
+      // that goes away). Anyone still watching would just see a frozen picture, so bring
+      // the capture back instead of leaving it dead.
+      maybeRestartCapture(state.reason);
+    }
     refreshTray();
     send(IPC.streamStats, hub.stats(sessions.count));
   });

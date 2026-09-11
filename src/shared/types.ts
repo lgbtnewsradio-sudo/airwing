@@ -46,6 +46,8 @@ export interface CaptureSource {
   appIcon?: string; // data URL
   displayId?: string;
   bounds?: Rect;
+  /** Display size in real pixels (bounds are in device-independent pixels). */
+  size?: { width: number; height: number };
   isVirtualDisplay?: boolean;
 }
 

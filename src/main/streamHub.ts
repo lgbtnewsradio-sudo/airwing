@@ -123,6 +123,27 @@ export class StreamHub extends EventEmitter {
     };
   }
 
+  /**
+   * Wait for the encoder's first output. The renderer reports capture as active as soon
+   * as it opens the capture stream, but the hub only becomes active once the first
+   * encoded frame arrives, so a receiver picked immediately would otherwise be refused.
+   */
+  waitForActive(timeoutMs = 15000): Promise<boolean> {
+    if (this.active) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      const started = Date.now();
+      const timer = setInterval(() => {
+        if (this.active) {
+          clearInterval(timer);
+          resolve(true);
+        } else if (Date.now() - started > timeoutMs) {
+          clearInterval(timer);
+          resolve(false);
+        }
+      }, 100);
+    });
+  }
+
   /** Wait until HLS has enough segments for a receiver to start. */
   waitForHls(timeoutMs = 12000): Promise<boolean> {
     if (this.segmenter.ready) return Promise.resolve(true);

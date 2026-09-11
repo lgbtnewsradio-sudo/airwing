@@ -97,7 +97,8 @@ export class SessionManager extends EventEmitter {
         mime = session.media.mime;
         session.info.transport = device.kind === 'cast' ? 'cast-file' : 'airplay-file';
       } else {
-        if (!this.opts.hub.active) throw new Error('no active stream; start mirroring first');
+        // The encoder may still be starting up when the receiver is picked.
+        if (!(await this.opts.hub.waitForActive())) throw new Error('the capture did not start; check the Logs tab');
         const ready = await this.opts.hub.waitForHls();
         if (!ready) throw new Error('stream did not produce segments in time');
         url = this.opts.server.hlsUrl(host);

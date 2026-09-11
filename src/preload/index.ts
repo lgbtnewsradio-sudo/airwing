@@ -52,7 +52,7 @@ const api = {
     onCommand: (cb: (cmd: CaptureCommand) => void) => on<CaptureCommand>(IPC.captureCommand, cb),
     sendMeta: (meta: StreamMeta) => ipcRenderer.send(IPC.streamMeta, meta),
     sendData: (data: Uint8Array, info: FragmentInfo) => ipcRenderer.send(IPC.streamData, data, info),
-    sendState: (state: { active: boolean; paused: boolean; dropped?: number; error?: string }) => ipcRenderer.send(IPC.streamState, state),
+    sendState: (state: { active: boolean; paused: boolean; dropped?: number; error?: string; reason?: string }) => ipcRenderer.send(IPC.streamState, state),
     stats: (): Promise<StreamStats> => ipcRenderer.invoke(IPC.streamStats),
     onStats: (cb: (stats: StreamStats) => void) => on<StreamStats>(IPC.streamStats, cb),
   },

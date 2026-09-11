@@ -88,6 +88,60 @@ describe('fMP4 muxer', () => {
     expect(decodeTimes).toEqual(ts.map((t) => Math.round((t * 90000) / 1e6)));
   });
 
+  it('leaves no hole in the timeline when frames are dropped', () => {
+    // Regression: a fixed per-frame duration left a gap whenever the encoder dropped a
+    // frame, and MSE stalls forever at a gap. Durations must come from the next timestamp.
+    const out: Array<{ data: Uint8Array; info: FragmentInfo }> = [];
+    const muxer = new Fmp4Muxer({ video: { codec: 'avc', width: 64, height: 64, description: AVCC }, onData: (d, i) => out.push({ data: d, info: i }) });
+    // 30 fps grid with frames 3,4,5 and 9 dropped, as happens when the encoder is busy.
+    // The odd timestamps also exercise rounding into the 90 kHz timescale.
+    const kept = [0, 1, 2, 6, 7, 8, 10, 11, 12];
+    for (const n of kept) muxer.addVideoSample(new Uint8Array([n]), n * 33333, n === 0);
+    muxer.flush();
+    const frags = out.filter((o) => o.info.kind === 'video');
+    expect(frags.length).toBe(kept.length);
+    const ts = 90000;
+    let prevEnd: number | null = null;
+    for (const f of frags) {
+      const traf = parseBoxes(parseBoxes(f.data)[0].payload).find((b) => b.type === 'traf')!;
+      const tfdt = parseBoxes(traf.payload).find((b) => b.type === 'tfdt')!;
+      const trun = parseBoxes(traf.payload).find((b) => b.type === 'trun')!;
+      const base = new DataView(tfdt.payload.buffer, tfdt.payload.byteOffset).getUint32(8);
+      const dur = new DataView(trun.payload.buffer, trun.payload.byteOffset).getUint32(12);
+      if (prevEnd !== null) expect(base).toBe(prevEnd); // contiguous: no gap, no overlap
+      prevEnd = base + dur;
+    }
+    // The frames spanning the dropped ones carry the longer duration instead.
+    const durOf = (i: number) => {
+      const traf = parseBoxes(parseBoxes(frags[i].data)[0].payload).find((b) => b.type === 'traf')!;
+      const trun = parseBoxes(traf.payload).find((b) => b.type === 'trun')!;
+      return new DataView(trun.payload.buffer, trun.payload.byteOffset).getUint32(12);
+    };
+    expect(durOf(2)).toBe(Math.round((6 * 33333 * ts) / 1e6) - Math.round((2 * 33333 * ts) / 1e6)); // frame 2 covers 3,4,5
+    expect(durOf(5)).toBe(Math.round((10 * 33333 * ts) / 1e6) - Math.round((8 * 33333 * ts) / 1e6)); // frame 8 covers 9
+  });
+
+  it('keeps a long run of frames exactly contiguous despite timescale rounding', () => {
+    const out: Array<{ data: Uint8Array; info: FragmentInfo }> = [];
+    const muxer = new Fmp4Muxer({ video: { codec: 'avc', width: 64, height: 64, description: AVCC }, onData: (d, i) => out.push({ data: d, info: i }) });
+    // 33333 us does not land on a whole 90 kHz tick, so rounding drifts over time.
+    for (let n = 0; n < 300; n++) muxer.addVideoSample(new Uint8Array([n & 0xff]), n * 33333, n % 30 === 0);
+    muxer.flush();
+    const frags = out.filter((o) => o.info.kind === 'video');
+    let prevEnd: number | null = null;
+    let seams = 0;
+    for (const f of frags) {
+      const traf = parseBoxes(parseBoxes(f.data)[0].payload).find((b) => b.type === 'traf')!;
+      const tfdt = parseBoxes(traf.payload).find((b) => b.type === 'tfdt')!;
+      const trun = parseBoxes(traf.payload).find((b) => b.type === 'trun')!;
+      const base = new DataView(tfdt.payload.buffer, tfdt.payload.byteOffset).getUint32(8);
+      const dur = new DataView(trun.payload.buffer, trun.payload.byteOffset).getUint32(12);
+      if (prevEnd !== null && base !== prevEnd) seams++;
+      prevEnd = base + dur;
+    }
+    expect(seams).toBe(0);
+  });
+
   it('derives codec strings and Opus/AAC configs', () => {
     expect(avcCodecString(AVCC)).toBe('avc1.640028');
     expect(Array.from(defaultAsc(48000, 2))).toEqual([0x11, 0x90]);

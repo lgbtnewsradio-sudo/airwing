@@ -24,10 +24,10 @@ test.afterAll(async () => {
 });
 
 test('main window renders devices, sources and settings', async () => {
-  await expect(page.locator('.brand .name')).toHaveText('AirWing');
-  await expect(page.locator('.tab.active')).toHaveText('Mirror');
-  await page.waitForSelector('.source', { timeout: 20000 });
-  const sources = await page.locator('.source').count();
+  await expect(page.locator('.app-name')).toHaveText('AirWing');
+  await expect(page.locator('.list-title').first()).toHaveText('From');
+  await page.waitForSelector('.row.selected', { timeout: 20000 });
+  const sources = await page.locator('.list .row').count();
   expect(sources).toBeGreaterThan(0);
   const info = await page.evaluate(() => window.airwing.receiver.info());
   expect(info.port).toBeGreaterThan(0);
@@ -35,16 +35,16 @@ test('main window renders devices, sources and settings', async () => {
   const health = await (await fetch(baseUrl + '/healthz')).json();
   expect(health.ok).toBe(true);
   await page.screenshot({ path: 'test-results/main-window.png' });
-  await page.click('button.tab:has-text("Settings")');
+  await page.click('.footer button[title="Settings"]');
   await expect(page.locator('h3', { hasText: 'Keyboard shortcuts' })).toBeVisible();
-  await page.click('button.tab:has-text("Browser")');
+  await page.click('.footer button[title^="Browser"]');
   await expect(page.locator('.url-row code').first()).toContainText(`:${info.port}`);
-  await page.click('button.tab:has-text("Mirror")');
+  await page.click('.subview .back');
 });
 
 test('starts a real screen capture, encodes H.264 and serves HLS + WebSocket viewers', async () => {
   test.setTimeout(120000);
-  await page.click('.linklike');
+  // No start step: selecting a source starts capture on its own.
   await expect
     .poll(async () => (await page.evaluate(() => window.airwing.capture.stats())).active, { timeout: 30000 })
     .toBe(true);
@@ -102,21 +102,20 @@ test('starts a real screen capture, encodes H.264 and serves HLS + WebSocket vie
   await page.screenshot({ path: 'test-results/main-window-streaming.png' });
 
   // Pause / resume keeps the stream alive.
-  await page.click('.panel-header button:has-text("Pause")');
+  await page.click('.toolbar button[title="Pause"]');
   await expect.poll(async () => (await page.evaluate(() => window.airwing.capture.stats())).paused, { timeout: 10000 }).toBe(true);
-  await page.click('.panel-header button:has-text("Resume")');
+  await page.click('.toolbar button[title="Resume"]');
   await expect.poll(async () => (await page.evaluate(() => window.airwing.capture.stats())).paused, { timeout: 10000 }).toBe(false);
 
   await viewer.close();
-  await page.click('.panel-header button:has-text("Stop")');
+  await page.click('.toolbar button[title="Stop"]');
   await expect.poll(async () => (await page.evaluate(() => window.airwing.capture.stats())).active, { timeout: 15000 }).toBe(false);
   expect((await fetch(baseUrl + '/hls/live.m3u8')).status).toBe(404);
 });
 
 test('audio-only capture produces an AAC/Opus stream', async () => {
   test.setTimeout(60000);
-  await page.click('.segmented button:has-text("Audio only")');
-  await page.click('.linklike');
+  await page.click('.row:has-text("Audio Only")');
   const result = await expect
     .poll(async () => (await page.evaluate(() => window.airwing.capture.stats())), { timeout: 30000 })
     .toMatchObject({ active: true });
@@ -125,8 +124,8 @@ test('audio-only capture produces an AAC/Opus stream', async () => {
   await expect.poll(async () => (await fetch(baseUrl + '/api/info')).json().then((i) => i.audioOnly), { timeout: 20000 }).toBe(true);
   const info = await (await fetch(baseUrl + '/api/info')).json();
   expect(info.mime).toMatch(/^audio\/mp4/);
-  await page.click('.panel-header button:has-text("Stop")');
+  await page.click('.toolbar button[title="Stop"]');
   await expect.poll(async () => (await page.evaluate(() => window.airwing.capture.stats())).active, { timeout: 15000 }).toBe(false);
-  await page.click('.segmented button:has-text("Entire display")');
+  await page.click('.row:has-text("Display 1")');
   void result;
 });

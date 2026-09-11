@@ -370,16 +370,22 @@ export class Fmp4Muxer {
     }
     if (this.pendingVideo) {
       const dur = Math.max(1000, rel - this.pendingVideo.timestampUs);
-      this.emitVideo(this.pendingVideo, dur);
+      this.emitVideo(this.pendingVideo, dur, rel);
     }
     this.pendingVideo = { data, timestampUs: rel, keyframe };
   }
 
-  private emitVideo(sample: PendingSample, durationUs: number): void {
+  private emitVideo(sample: PendingSample, durationUs: number, nextTimestampUs?: number): void {
     const ts = this.videoTimescale;
-    const durationTs = Math.max(1, Math.round((durationUs * ts) / 1e6));
     // Keep decode time locked to the sample's presentation time to avoid drift.
     const base = Math.round((sample.timestampUs * ts) / 1e6);
+    // Derive the duration from the next sample's decode time so fragments are exactly
+    // contiguous. Rounding the duration independently leaves a sub-millisecond seam, and
+    // any seam at all is a hole that MSE can stall on.
+    const durationTs =
+      nextTimestampUs === undefined
+        ? Math.max(1, Math.round((durationUs * ts) / 1e6))
+        : Math.max(1, Math.round((nextTimestampUs * ts) / 1e6) - base);
     this.videoDecodeTime = base;
     this.lastVideoDurationUs = durationUs;
     const frag = buildFragment(VIDEO_TRACK_ID, this.sequence, base, durationTs, sample.data, sample.keyframe);

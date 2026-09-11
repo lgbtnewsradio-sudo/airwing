@@ -92,11 +92,31 @@
     try { sb.appendBuffer(chunk); } catch (e) { console.warn('append failed', e); }
   }
 
+  var lastTime = -1, stallTicks = 0;
   function keepLive() {
     if (!sb || !sb.buffered.length) return;
     const end = sb.buffered.end(sb.buffered.length - 1);
     const start = sb.buffered.start(sb.buffered.length - 1);
     const lag = end - video.currentTime;
+
+    // Safety net: if playback is not advancing but there is media buffered ahead, we are
+    // parked at a gap in the timeline. Seek across it rather than freezing forever.
+    if (started && !video.paused) {
+      if (Math.abs(video.currentTime - lastTime) < 0.01) {
+        stallTicks++;
+        if (stallTicks >= 4) {
+          let target = -1;
+          for (let i = 0; i < sb.buffered.length; i++) {
+            if (sb.buffered.start(i) > video.currentTime) { target = sb.buffered.start(i); break; }
+          }
+          if (target < 0 && end > video.currentTime + 0.25) target = end - 0.15;
+          if (target > 0) { video.currentTime = target + 0.001; video.play().catch(() => {}); }
+          stallTicks = 0;
+        }
+      } else stallTicks = 0;
+      lastTime = video.currentTime;
+    }
+
     if (video.currentTime < start || lag > 1.0) { video.currentTime = Math.max(start, end - 0.15); }
     else if (lag > 0.4) video.playbackRate = 1.05;
     else video.playbackRate = 1.0;

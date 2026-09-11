@@ -38,7 +38,7 @@ Grab `AirWing-<version>-win-x64.exe` (installer) or the portable `.zip` from the
 Silent install for managed rollouts:
 
 ```bash
-AirWing-1.0.2-win-x64.exe /S
+AirWing-1.0.3-win-x64.exe /S
 ```
 
 Settings live in `%APPDATA%\AirWing\settings.json`; AirPlay pairing keys in `credentials.json` beside it.
@@ -88,8 +88,8 @@ The mock receivers under `tests/mocks` speak the real wire protocols (HAP SRP/Ed
 
 ## Using AirWing
 
-1. **Mirror** tab, *What to stream*: choose *Entire display*, *Single app*, *Screen region* (drag a rectangle) or *Audio only*. Expand *Quality* if you want to change resolution, frame rate, bitrate or latency.
-2. *Where to stream*, directly underneath: click a receiver. That starts the capture and connects in one step — you can add more receivers while it runs. AirPlay receivers that require a code will pop up a pairing dialog the first time; enter the 4-digit code shown on the TV.
+1. **From**: pick a display, an application window, a screen region, *Audio Only*, or a media file. Capture starts by itself — there is no start button.
+2. **To**: click a receiver. AirPlay receivers that need a code show a pairing dialog the first time; enter the 4-digit code from the TV. Click the row again to stop, or use the transport bar at the top to pause or stop everything.
 3. **Media** tab: choose a file. *Direct* sends it to the receiver untouched (best quality, receiver-side seeking); *Transcode* re-encodes anything Chromium can decode into a live stream.
 4. **Extend Desktop** tab: install the free [Virtual Display Driver](https://github.com/VirtualDrivers/Virtual-Display-Driver), add a virtual monitor, and stream it like any other display.
 5. **Browser Receiver** tab: open the URL on any device with a browser to watch with sub-second latency; the phone **remote** URL controls everything from the couch.

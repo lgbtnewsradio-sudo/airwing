@@ -1,15 +1,14 @@
-## AirWing 1.0.2
+## AirWing 1.0.3
 
-**Simpler window.** AirWing is now a single compact window laid out the way AirParrot is: **What to stream** on top, **Where to stream** directly underneath. Picking a receiver starts everything, so there is no separate "start mirroring first" step. Quality settings are collapsed into a one-line summary you can expand when you need them, and pause/stop moved into the section header.
+**Fixed: streaming froze.** The encoder wrote a fixed 33 ms duration on every frame while timestamps came from a real-time clock, so each frame the encoder dropped under load left a hole in the video timeline — and a player stalls forever at a hole. Durations are now derived from the next frame's decode time, making the timeline exactly contiguous. Verified on a live stream (zero discontinuities across every segment) and by soak-testing a receiver under eight CPU-saturating processes: 144 seconds, zero stalls, where it previously froze permanently after about 37.
 
-**Fixed**
-- **"Connection closed by receiver" on Apple TV.** AirWing was sending the RTSP `RECORD` command, which belongs to the realtime audio path, before playing a video URL. Apple TV drops the connection when it receives it. Video URL playback now uses the plain `/play` flow.
-- **HLS receivers are now given a multivariant (master) playlist** naming the variant's codecs, resolution and frame rate, which is what AirPlay and Cast receivers expect at the play URL.
-- Event-channel messages from the receiver are now framed and answered individually (a receiver can batch several into one packet), with the `Audio-Latency` header real receivers expect.
+Also fixed alongside it:
+- Picking a receiver in the first second of capture failed with "no active stream"; connecting now waits for the encoder to produce its first frame.
+- A capture that Windows ends on its own (display change, session switch, a source that disappears) used to stop silently and look like a frozen picture. It is now logged with a reason and restarted automatically while anyone is still watching.
+- Receivers get a safety net that seeks across a gap rather than stalling, in case one ever appears.
 
-**Known limitation: Apple TV video**
-Current tvOS accepts a `/play` request from a third-party sender and then never loads the stream — it requires Apple's proprietary FairPlay handshake. This was confirmed by asking the Apple TV to play **Apple's own reference HLS stream**, which it also ignored, so it is not a problem with AirWing's output. AirWing now detects this and says so plainly instead of showing a confusing error. To put this PC's screen on an Apple TV, use the **Browser** tab and open the receiver URL in a browser on a device attached to the TV. HomePod and other AirPlay speakers, Chromecast, and browser receivers are unaffected.
+**New window.** Rebuilt to match AirParrot's compact single-window layout: a status line showing what is being streamed, a small transport bar, then **From** and **To** lists of plain rows. Selecting a source starts capture on its own and clicking a destination streams to it, so there is no start, cast, pause or stop step to hit first. Quick-connect by IP address sits at the top of the **To** list, and settings, diagnostics and the browser receiver moved to the footer.
 
 **Downloads**
-- `AirWing-1.0.2-win-x64.exe` — installer (supports silent `/S` install)
-- `AirWing-1.0.2-win-x64.zip` — portable
+- `AirWing-1.0.3-win-x64.exe` — installer (supports silent `/S` install)
+- `AirWing-1.0.3-win-x64.zip` — portable

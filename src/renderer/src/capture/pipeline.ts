@@ -15,7 +15,7 @@ import { Fmp4Muxer, avcCodecString, type FragmentInfo } from '@shared/fmp4';
 import type { EncoderInfo, StreamConfig, StreamMeta } from '@shared/types';
 
 export interface PipelineEvents {
-  state: (state: { active: boolean; paused: boolean; error?: string }) => void;
+  state: (state: { active: boolean; paused: boolean; error?: string; reason?: string }) => void;
 }
 
 const RESOLUTION_LIMITS: Record<string, number> = {
@@ -492,7 +492,10 @@ export class CapturePipeline {
       this.ensureMuxer(false);
       return;
     }
-    this.muxer.addVideoSample(sample.data, sample.ts, sample.key, sample.dur);
+    // Pass no duration: the muxer derives each frame's duration from the next frame's
+    // timestamp. A fixed duration would leave a hole in the timeline whenever a frame is
+    // dropped, and MSE stalls forever at a hole (this is what froze receivers).
+    this.muxer.addVideoSample(sample.data, sample.ts, sample.key, undefined);
   }
 
   private onAudioChunk(chunk: EncodedAudioChunk, meta?: EncodedAudioChunkMetadata): void {
@@ -546,7 +549,7 @@ export class CapturePipeline {
     const startTs = video[0]?.ts ?? this.pendingAudio[0]?.ts ?? 0;
     const audio = includeAudio ? this.pendingAudio.filter((a) => a.ts >= startTs - 50_000) : [];
     const merged = [
-      ...video.map((v) => ({ ts: v.ts, run: () => this.muxer!.addVideoSample(v.data, v.ts, v.key, v.dur) })),
+      ...video.map((v) => ({ ts: v.ts, run: () => this.muxer!.addVideoSample(v.data, v.ts, v.key, undefined) })),
       ...audio.map((a) => ({ ts: a.ts, run: () => this.muxer!.addAudioSample(a.data, a.ts, a.dur) })),
     ].sort((a, b) => a.ts - b.ts);
     for (const m of merged) m.run();
@@ -634,7 +637,11 @@ export class CapturePipeline {
     this.canvas = null;
     this.ctx = null;
     this.paused = false;
-    if (wasRunning || reason) this.onState({ active: false, paused: false, error: reason && !/finished|ended/.test(reason) ? reason : undefined });
+    // Always report why capture stopped; silently swallowing "ended" reasons made a
+    // capture that died on its own look like a frozen picture with nothing in the log.
+    if (wasRunning || reason) {
+      this.onState({ active: false, paused: false, reason: reason ?? 'stopped by request', error: reason && !/finished|stopped by request/.test(reason) ? reason : undefined });
+    }
     this.stopping = false;
   }
 }
