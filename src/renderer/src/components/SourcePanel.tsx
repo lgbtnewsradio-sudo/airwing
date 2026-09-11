@@ -38,6 +38,7 @@ const LATENCIES: [LatencyMode, string][] = [
 
 export function SourcePanel({ sources, config, onChange, onRefresh, active, paused, onStart, onStop, onPause, stats }: Props) {
   const [kind, setKind] = useState<'screen' | 'window' | 'region' | 'audio'>(config.sourceKind === 'media' ? 'screen' : (config.sourceKind as any));
+  const [showQuality, setShowQuality] = useState(false);
   const screens = sources.filter((s) => s.kind === 'screen');
   const windows = sources.filter((s) => s.kind === 'window');
   const selected = sources.find((s) => s.id === config.sourceId);
@@ -71,10 +72,22 @@ export function SourcePanel({ sources, config, onChange, onRefresh, active, paus
   return (
     <div className="panel">
       <div className="panel-header">
-        <h2>What to mirror</h2>
-        <button className="ghost" onClick={onRefresh} title="Refresh sources">
-          ⟳
-        </button>
+        <h2>What to stream</h2>
+        <div className="header-actions">
+          {active && (
+            <>
+              <button className="ghost small" onClick={onPause}>
+                {paused ? '▶ Resume' : '⏸ Pause'}
+              </button>
+              <button className="danger small" onClick={onStop}>
+                ■ Stop
+              </button>
+            </>
+          )}
+          <button className="ghost" onClick={onRefresh} title="Refresh sources">
+            ⟳
+          </button>
+        </div>
       </div>
       <div className="segmented">
         {(
@@ -122,8 +135,14 @@ export function SourcePanel({ sources, config, onChange, onRefresh, active, paus
         </div>
       )}
 
-      <h3>Quality</h3>
-      <div className="options">
+      <button className="disclosure" onClick={() => setShowQuality((v) => !v)}>
+        {showQuality ? '▾' : '▸'} Quality
+        <span className="hint inline">
+          {kind === 'audio' ? `${config.audioBitrate / 1000} kbps` : `${config.resolution} · ${config.frameRate} fps · ${config.quality}`}
+          {config.audio || kind === 'audio' ? ' · audio' : ' · no audio'}
+        </span>
+      </button>
+      <div className="options" hidden={!showQuality}>
         {kind !== 'audio' && (
           <>
             <label>
@@ -188,22 +207,6 @@ export function SourcePanel({ sources, config, onChange, onRefresh, active, paus
         </label>
       </div>
 
-      <div className="actions">
-        {!active ? (
-          <button className="primary big" onClick={onStart} disabled={kind !== 'audio' && !selected && kind !== 'region'}>
-            ▶ Start {kind === 'audio' ? 'audio stream' : 'mirroring'}
-          </button>
-        ) : (
-          <>
-            <button className="secondary big" onClick={onPause}>
-              {paused ? '▶ Resume' : '⏸ Pause'}
-            </button>
-            <button className="danger big" onClick={onStop}>
-              ■ Stop
-            </button>
-          </>
-        )}
-      </div>
       {active && stats?.encoder && (
         <p className="hint">
           Encoding {stats.encoder.width}×{stats.encoder.height} @ {stats.fps} fps · {Math.round(stats.kbps / 1000)} Mbps · {stats.encoder.videoCodec}
@@ -212,7 +215,14 @@ export function SourcePanel({ sources, config, onChange, onRefresh, active, paus
           {stats.droppedFrames ? ` · ${stats.droppedFrames} dropped` : ''}
         </p>
       )}
-      <p className="hint">Then pick a receiver on the right. You can stream to several receivers at once, and browser viewers can join through the Browser Receiver tab.</p>
+      {!active && (
+        <p className="hint">
+          Pick a receiver below to start — you can stream to several at once.
+          <button className="linklike" onClick={onStart} disabled={kind !== 'audio' && !selected && kind !== 'region'}>
+            Or start without a receiver
+          </button>
+        </p>
+      )}
     </div>
   );
 }

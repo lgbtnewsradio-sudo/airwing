@@ -38,7 +38,7 @@ Grab `AirWing-<version>-win-x64.exe` (installer) or the portable `.zip` from the
 Silent install for managed rollouts:
 
 ```bash
-AirWing-1.0.1-win-x64.exe /S
+AirWing-1.0.2-win-x64.exe /S
 ```
 
 Settings live in `%APPDATA%\AirWing\settings.json`; AirPlay pairing keys in `credentials.json` beside it.
@@ -88,8 +88,8 @@ The mock receivers under `tests/mocks` speak the real wire protocols (HAP SRP/Ed
 
 ## Using AirWing
 
-1. **Mirror** tab: choose *Entire display*, *Single app*, *Screen region* (drag a rectangle) or *Audio only*, pick quality (resolution, frame rate, bitrate, latency mode) and press **Start mirroring**.
-2. Pick one or more **receivers** on the right. AirPlay receivers that require a code will pop up a pairing dialog the first time; enter the 4-digit code shown on the TV.
+1. **Mirror** tab, *What to stream*: choose *Entire display*, *Single app*, *Screen region* (drag a rectangle) or *Audio only*. Expand *Quality* if you want to change resolution, frame rate, bitrate or latency.
+2. *Where to stream*, directly underneath: click a receiver. That starts the capture and connects in one step — you can add more receivers while it runs. AirPlay receivers that require a code will pop up a pairing dialog the first time; enter the 4-digit code shown on the TV.
 3. **Media** tab: choose a file. *Direct* sends it to the receiver untouched (best quality, receiver-side seeking); *Transcode* re-encodes anything Chromium can decode into a live stream.
 4. **Extend Desktop** tab: install the free [Virtual Display Driver](https://github.com/VirtualDrivers/Virtual-Display-Driver), add a virtual monitor, and stream it like any other display.
 5. **Browser Receiver** tab: open the URL on any device with a browser to watch with sub-second latency; the phone **remote** URL controls everything from the couch.
@@ -97,7 +97,8 @@ The mock receivers under `tests/mocks` speak the real wire protocols (HAP SRP/Ed
 
 ## Known limitations and honest notes
 
-* **Apple TV / Roku / Fire TV mirroring uses HLS**, so those receivers show roughly 2–4 s of delay (fine for presentations and video, not for gaming). Use the browser receiver for near-real-time viewing. Native AirPlay *screen* mirroring requires Apple's FairPlay-encrypted transport, which is not publicly documented.
+* **Apple TV video does not work and cannot be made to work.** Current tvOS accepts a `/play` request from a third-party sender and then never loads the stream, because it requires Apple's proprietary FairPlay handshake. Verified by asking the Apple TV to play Apple's own reference HLS stream, which it also ignored. Use the browser receiver on a device attached to the TV instead. AirPlay *speakers* (HomePod) are unaffected.
+* **Roku / Fire TV mirroring uses HLS**, so those receivers show roughly 2–4 s of delay (fine for presentations and video, not for gaming). Use the browser receiver for near-real-time viewing.
 * **HomePod and AirPlay speakers** receive the audio-only HLS stream through the AirPlay 2 video path; RAOP/RTP realtime audio is not implemented yet.
 * **Extend Desktop** relies on a third-party virtual display driver because Windows requires a signed IddCx driver to create displays.
 * The AirPlay 2 implementation was validated against mock receivers and a HomePod mini/Apple TV on a home network; other brands may need tweaks — please open an issue with the `Logs` tab output.

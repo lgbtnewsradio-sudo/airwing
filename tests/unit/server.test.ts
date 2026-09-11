@@ -74,6 +74,20 @@ describe('local server + stream hub', () => {
     expect(info.codecs).toBe('avc1.640028,mp4a.40.2');
   });
 
+  it('serves a multivariant master playlist naming codecs, resolution and frame rate', async () => {
+    const res = await fetch(base + '/hls/master.m3u8');
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe('application/vnd.apple.mpegurl');
+    const master = await res.text();
+    expect(master).toContain('#EXTM3U');
+    expect(master).toContain('#EXT-X-STREAM-INF:');
+    expect(master).toContain('CODECS="avc1.640028,mp4a.40.2"');
+    expect(master).toContain('RESOLUTION=640x360');
+    expect(master).toContain('FRAME-RATE=30.000');
+    // The single variant points at the media playlist.
+    expect(master.trim().split('\n').pop()).toBe('live.m3u8');
+  });
+
   it('streams init + GOP + live fragments to WebSocket viewers with a binary header', async () => {
     const ws = new WebSocket(base.replace('http', 'ws') + '/ws/view');
     const frames: Array<{ kind: number; key: number; len: number }> = [];
@@ -134,10 +148,10 @@ describe('local server + stream hub', () => {
     try {
       const s1 = await sessions.connect(atv, { type: 'live' });
       expect(s1.state).toBe('streaming');
-      expect(airplay.playedUrls[0]).toBe(`http://127.0.0.1:${server.port}/hls/live.m3u8`);
+      expect(airplay.playedUrls[0]).toBe(`http://127.0.0.1:${server.port}/hls/master.m3u8`);
       const s2 = await sessions.connect(cc, { type: 'live' });
       expect(s2.state).toBe('streaming');
-      expect(cast.loaded[0].contentId).toBe(`http://127.0.0.1:${server.port}/hls/live.m3u8`);
+      expect(cast.loaded[0].contentId).toBe(`http://127.0.0.1:${server.port}/hls/master.m3u8`);
       expect(cast.loaded[0].streamType).toBe('LIVE');
       expect(sessions.count).toBe(2);
       await sessions.mediaControl('cast:mock', { type: 'volume', volume: 0.4 });

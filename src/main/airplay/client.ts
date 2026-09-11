@@ -99,6 +99,8 @@ export class AirPlayClient extends EventEmitter {
   version: 1 | 2 = 2;
   info: Record<string, any> | null = null;
   playing = false;
+  /** Use the plain /play video flow (no SETUP/RECORD/timing). */
+  videoPlayback = false;
 
   constructor(readonly opts: AirPlayClientOptions) {
     super();
@@ -265,16 +267,29 @@ export class AirPlayClient extends EventEmitter {
           sock.on('error', (err) => {
             if (!this.eventSocket) reject(err);
           });
+          let eventRx = Buffer.alloc(0);
           sock.on('data', (data) => {
             try {
               const plain = framer.decrypt(data);
-              if (plain.length) {
-                log.debug(this.scope, `event: ${plain.toString('utf8').split('\r\n')[0]}`);
-                // Acknowledge event requests so the receiver keeps the session alive.
-                const m = /^(\w+) \S+ (HTTP|RTSP)\/([0-9.]+)/.exec(plain.toString('utf8'));
+              if (!plain.length) return;
+              eventRx = Buffer.concat([eventRx, plain]);
+              // The receiver may batch several requests in one packet; answer each one
+              // (pyatv-style 200 OK with Audio-Latency) so the session stays alive.
+              for (;;) {
+                const headEnd = eventRx.indexOf('\r\n\r\n');
+                if (headEnd < 0) break;
+                const headText = eventRx.subarray(0, headEnd).toString('utf8');
+                const contentLength = parseInt(/content-length:\s*(\d+)/i.exec(headText)?.[1] ?? '0', 10) || 0;
+                const total = headEnd + 4 + contentLength;
+                if (eventRx.length < total) break;
+                const body = eventRx.subarray(headEnd + 4, total);
+                eventRx = eventRx.subarray(total);
+                this.logEvent(headText, body);
+                const m = /^(\w+) \S+ (HTTP|RTSP)\/([0-9.]+)/.exec(headText);
                 if (m) {
-                  const cseq = /CSeq: (\d+)/i.exec(plain.toString('utf8'))?.[1];
-                  const reply = `${m[2]}/${m[3]} 200 OK\r\n${cseq ? `CSeq: ${cseq}\r\n` : ''}Content-Length: 0\r\n\r\n`;
+                  const cseq = /CSeq:\s*(\d+)/i.exec(headText)?.[1];
+                  const server = /Server:\s*(.+)/i.exec(headText)?.[1];
+                  const reply = `${m[2]}/${m[3]} 200 OK\r\n${cseq ? `CSeq: ${cseq}\r\n` : ''}${server ? `Server: ${server}\r\n` : ''}Audio-Latency: 0\r\nContent-Length: 0\r\n\r\n`;
                   sock.write(framer.encrypt(Buffer.from(reply)));
                 }
               }
@@ -292,6 +307,16 @@ export class AirPlayClient extends EventEmitter {
         log.debug(this.scope, `event channel connect failed (${attempt + 1}/5): ${(err as Error).message}`);
         await new Promise((r) => setTimeout(r, 700));
       }
+    }
+  }
+
+  private logEvent(headText: string, body: Buffer): void {
+    try {
+      const parsed = body.length ? fromPlist(body) : null;
+      const json = parsed ? JSON.stringify(parsed, (_k, v) => (typeof v === 'bigint' ? Number(v) : Buffer.isBuffer(v) ? `<${v.length}B>` : v)).slice(0, 600) : '';
+      log.debug(this.scope, `event: ${headText.split('\r\n').join(' | ')}${json ? ` body=${json}` : body.length ? ` body=${body.length}B` : ''}`);
+    } catch (err) {
+      log.debug(this.scope, `event parse failed: ${(err as Error).message}`);
     }
   }
 
@@ -314,7 +339,9 @@ export class AirPlayClient extends EventEmitter {
     const conn = this.conn!;
     const position = opts.position ?? 0;
     let resp: AirPlayResponse;
-    if (this.version === 2) {
+    // Video URL playback uses the /play endpoint directly. SETUP/RECORD belong to the
+    // realtime audio (RAOP) path; sending RECORD here makes Apple TV drop the connection.
+    if (this.version === 2 && !this.videoPlayback) {
       await this.setupV2();
       await this.rtsp('RECORD', null, undefined, true);
       resp = await conn.post('/play', {

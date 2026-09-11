@@ -108,10 +108,10 @@ function iconPath(name: string): string {
 
 function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
-    width: 1180,
-    height: 780,
-    minWidth: 900,
-    minHeight: 600,
+    width: 560,
+    height: 720,
+    minWidth: 420,
+    minHeight: 520,
     show: false,
     title: 'AirWing',
     backgroundColor: '#0f1219',

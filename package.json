@@ -1,6 +1,6 @@
 {
   "name": "airwing",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Wireless screen mirroring, media streaming and extended desktop for Windows. Mirror to Apple TV (AirPlay), Chromecast (Google Cast), Reflector, and any web browser.",
   "main": "./out/main/index.js",
   "author": "AirWing contributors",
@@ -41,6 +41,7 @@
     "playwright": "^1.63.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
+    "tsx": "^4.23.13",
     "typescript": "^5.9.0",
     "vite": "^7.1.0",
     "vitest": "^5.0.0"

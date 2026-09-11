@@ -37,14 +37,14 @@ test('main window renders devices, sources and settings', async () => {
   await page.screenshot({ path: 'test-results/main-window.png' });
   await page.click('button.tab:has-text("Settings")');
   await expect(page.locator('h3', { hasText: 'Keyboard shortcuts' })).toBeVisible();
-  await page.click('button.tab:has-text("Browser Receiver")');
+  await page.click('button.tab:has-text("Browser")');
   await expect(page.locator('.url-row code').first()).toContainText(`:${info.port}`);
   await page.click('button.tab:has-text("Mirror")');
 });
 
 test('starts a real screen capture, encodes H.264 and serves HLS + WebSocket viewers', async () => {
   test.setTimeout(120000);
-  await page.click('button:has-text("Start mirroring")');
+  await page.click('.linklike');
   await expect
     .poll(async () => (await page.evaluate(() => window.airwing.capture.stats())).active, { timeout: 30000 })
     .toBe(true);
@@ -102,13 +102,13 @@ test('starts a real screen capture, encodes H.264 and serves HLS + WebSocket vie
   await page.screenshot({ path: 'test-results/main-window-streaming.png' });
 
   // Pause / resume keeps the stream alive.
-  await page.click('button:has-text("Pause")');
+  await page.click('.panel-header button:has-text("Pause")');
   await expect.poll(async () => (await page.evaluate(() => window.airwing.capture.stats())).paused, { timeout: 10000 }).toBe(true);
-  await page.click('button:has-text("Resume")');
+  await page.click('.panel-header button:has-text("Resume")');
   await expect.poll(async () => (await page.evaluate(() => window.airwing.capture.stats())).paused, { timeout: 10000 }).toBe(false);
 
   await viewer.close();
-  await page.click('button:has-text("Stop")');
+  await page.click('.panel-header button:has-text("Stop")');
   await expect.poll(async () => (await page.evaluate(() => window.airwing.capture.stats())).active, { timeout: 15000 }).toBe(false);
   expect((await fetch(baseUrl + '/hls/live.m3u8')).status).toBe(404);
 });
@@ -116,7 +116,7 @@ test('starts a real screen capture, encodes H.264 and serves HLS + WebSocket vie
 test('audio-only capture produces an AAC/Opus stream', async () => {
   test.setTimeout(60000);
   await page.click('.segmented button:has-text("Audio only")');
-  await page.click('button:has-text("Start audio stream")');
+  await page.click('.linklike');
   const result = await expect
     .poll(async () => (await page.evaluate(() => window.airwing.capture.stats())), { timeout: 30000 })
     .toMatchObject({ active: true });
@@ -125,7 +125,7 @@ test('audio-only capture produces an AAC/Opus stream', async () => {
   await expect.poll(async () => (await fetch(baseUrl + '/api/info')).json().then((i) => i.audioOnly), { timeout: 20000 }).toBe(true);
   const info = await (await fetch(baseUrl + '/api/info')).json();
   expect(info.mime).toMatch(/^audio\/mp4/);
-  await page.click('button:has-text("Stop")');
+  await page.click('.panel-header button:has-text("Stop")');
   await expect.poll(async () => (await page.evaluate(() => window.airwing.capture.stats())).active, { timeout: 15000 }).toBe(false);
   await page.click('.segmented button:has-text("Entire display")');
   void result;

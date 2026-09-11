@@ -155,7 +155,7 @@ export class LocalServer extends EventEmitter {
   }
 
   hlsUrl(host: string): string {
-    return `http://${host}:${this.port}/hls/live.m3u8`;
+    return `http://${host}:${this.port}/hls/master.m3u8`;
   }
 
   receiverUrl(host: string): string {
@@ -190,6 +190,7 @@ export class LocalServer extends EventEmitter {
       if (path === '/' || path === '/index.html') return await this.serveStatic(res, 'receiver/index.html');
       if (path === '/remote' || path === '/remote.html') return await this.serveStatic(res, 'receiver/remote.html');
       if (path === '/api/info') return this.json(res, this.infoPayload());
+      if (path === '/hls/master.m3u8') return this.serveMaster(res);
       if (path === '/hls/live.m3u8') return this.servePlaylist(res);
       if (path === '/hls/init.mp4') return this.serveInit(res);
       if (path.startsWith('/hls/seg-')) return this.serveSegment(res, path);
@@ -242,6 +243,37 @@ export class LocalServer extends EventEmitter {
     }
     res.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl', 'Cache-Control': 'no-store' });
     res.end(seg.playlist());
+  }
+
+  /**
+   * Multivariant (master) playlist. Apple TV's AirPlay player expects the /play
+   * Content-Location to be a master playlist that names its variant's codecs,
+   * resolution and frame rate; handed a bare media playlist it errors out.
+   */
+  private serveMaster(res: http.ServerResponse): void {
+    const hub = this.opts.hub;
+    if (!hub.active || !hub.segmenter.ready) {
+      res.writeHead(404, { 'Cache-Control': 'no-store' });
+      res.end();
+      return;
+    }
+    const enc = hub.meta?.encoder;
+    const codecs = hub.meta?.codecs ?? 'avc1.640028,mp4a.40.2';
+    const bandwidth = Math.round((enc?.videoBitrate ?? 6_000_000) + (enc?.audioBitrate ?? 160_000)) + 200_000;
+    const lines = [
+      '#EXTM3U',
+      '#EXT-X-VERSION:7',
+      '#EXT-X-INDEPENDENT-SEGMENTS',
+    ];
+    if (hub.meta?.audioOnly) {
+      lines.push(`#EXT-X-STREAM-INF:BANDWIDTH=${bandwidth},CODECS="${codecs}"`, 'live.m3u8');
+    } else {
+      const res2 = enc ? `,RESOLUTION=${enc.width}x${enc.height}` : '';
+      const fr = enc?.frameRate ? `,FRAME-RATE=${enc.frameRate.toFixed(3)}` : '';
+      lines.push(`#EXT-X-STREAM-INF:BANDWIDTH=${bandwidth},AVERAGE-BANDWIDTH=${bandwidth}${res2}${fr},CODECS="${codecs}"`, 'live.m3u8');
+    }
+    res.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl', 'Cache-Control': 'no-store' });
+    res.end(lines.join('\n') + '\n');
   }
 
   private serveInit(res: http.ServerResponse): void {

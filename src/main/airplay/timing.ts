@@ -1,6 +1,7 @@
 /** UDP timing responder for AirPlay 2 (NTP-style RTP timing packets). */
 
 import dgram from 'node:dgram';
+import { log } from '../logger';
 
 const NTP_EPOCH_OFFSET = 2208988800;
 
@@ -14,6 +15,7 @@ export function ntpNow(): { sec: number; frac: number } {
 export class TimingServer {
   private socket: dgram.Socket | null = null;
   port = 0;
+  requests = 0;
 
   start(bindAddress = '0.0.0.0'): Promise<number> {
     return new Promise((resolve, reject) => {
@@ -22,6 +24,8 @@ export class TimingServer {
         if (!this.socket) reject(err);
       });
       socket.on('message', (msg, rinfo) => {
+        this.requests++;
+        if (this.requests <= 3) log.debug('timing', `timing request ${this.requests} from ${rinfo.address}:${rinfo.port} (${msg.length} bytes)`);
         if (msg.length < 32) return;
         const resp = Buffer.alloc(32);
         resp[0] = 0x80;

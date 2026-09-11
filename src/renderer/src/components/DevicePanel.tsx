@@ -72,7 +72,7 @@ export function DevicePanel(props: Props) {
   return (
     <div className="panel devices">
       <div className="panel-header">
-        <h2>Receivers</h2>
+        <h2>Where to stream</h2>
         <div>
           <button className="ghost" onClick={() => setShowAdd((v) => !v)} title="Connect by IP address">
             ＋

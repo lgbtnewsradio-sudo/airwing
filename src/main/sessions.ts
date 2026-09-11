@@ -167,8 +167,22 @@ export class SessionManager extends EventEmitter {
       senderName: this.opts.senderName(),
     });
     session.airplay = client;
+    // Video URL playback uses the plain /play flow; SETUP/RECORD is the audio path.
+    client.videoPlayback = device.caps.video;
+    let readyPolls = 0;
     client.on('playback', (info) => {
       this.update(session, { position: info.position, duration: info.duration, playing: (info.rate ?? 0) > 0 });
+      if (info.duration === undefined && !info.readyToPlay) {
+        // Some receivers (current tvOS) accept /play from a third-party sender but never
+        // load it, because they require Apple's proprietary FairPlay handshake.
+        if (++readyPolls === 8 && session.info.state === 'streaming') {
+          this.setState(
+            session,
+            'error',
+            `${device.name} accepted the stream but never started playing. This receiver appears to require Apple's FairPlay authentication, which AirWing cannot provide. Use the Browser tab to watch on this TV instead.`,
+          );
+        }
+      } else readyPolls = 0;
     });
     client.on('ended', () => {
       if (!session.stopping) void this.disconnect(device.id, 'playback ended');

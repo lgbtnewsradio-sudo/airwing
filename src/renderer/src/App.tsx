@@ -193,6 +193,10 @@ export function App() {
     return <div className="loading">Loading AirWing…</div>;
   }
 
+  // "What to stream" on top, "Where to stream" directly underneath — picking a
+  // receiver starts everything, so there is no separate first step.
+  const showDevices = tab === 'mirror' || tab === 'media';
+
   return (
     <div className="app">
       <header className="titlebar">
@@ -206,8 +210,8 @@ export function App() {
             [
               ['mirror', 'Mirror'],
               ['media', 'Media'],
-              ['extend', 'Extend Desktop'],
-              ['receiver', 'Browser Receiver'],
+              ['extend', 'Extend'],
+              ['receiver', 'Browser'],
               ['settings', 'Settings'],
               ['logs', 'Logs'],
             ] as [Tab, string][]
@@ -227,29 +231,28 @@ export function App() {
         </div>
       </header>
 
-      <main className="content">
-        <section className="left">
-          {tab === 'mirror' && (
-            <SourcePanel
-              sources={sources}
-              config={config}
-              onChange={updateConfig}
-              onRefresh={refreshSources}
-              active={captureState.active}
-              paused={captureState.paused}
-              onStart={() => startMirroring()}
-              onStop={stopAll}
-              onPause={togglePause}
-              stats={stats}
-            />
-          )}
-          {tab === 'media' && <MediaPanel media={media} setMedia={setMedia} config={config} onChange={updateConfig} sessions={sessions} pipeline={pipeline} active={captureState.active} onStop={stopAll} />}
-          {tab === 'extend' && <ExtendPanel onMirrorDisplay={(displayId, sourceId) => startMirroring({ sourceKind: 'screen', sourceId, displayId })} sources={sources} />}
-          {tab === 'receiver' && <ReceiverPanel info={receiver} settings={settings} onSettings={(p) => api.settings.set(p)} stats={stats} />}
-          {tab === 'settings' && <SettingsPanel settings={settings} onChange={(p) => api.settings.set(p)} />}
-          {tab === 'logs' && <LogPanel logs={logs} />}
-        </section>
-        <aside className="right">
+      <main className={showDevices ? 'content stacked' : 'content'}>
+        {tab === 'mirror' && (
+          <SourcePanel
+            sources={sources}
+            config={config}
+            onChange={updateConfig}
+            onRefresh={refreshSources}
+            active={captureState.active}
+            paused={captureState.paused}
+            onStart={() => startMirroring()}
+            onStop={stopAll}
+            onPause={togglePause}
+            stats={stats}
+          />
+        )}
+        {tab === 'media' && <MediaPanel media={media} setMedia={setMedia} config={config} onChange={updateConfig} sessions={sessions} pipeline={pipeline} active={captureState.active} onStop={stopAll} />}
+        {tab === 'extend' && <ExtendPanel onMirrorDisplay={(displayId, sourceId) => startMirroring({ sourceKind: 'screen', sourceId, displayId })} sources={sources} />}
+        {tab === 'receiver' && <ReceiverPanel info={receiver} settings={settings} onSettings={(p) => api.settings.set(p)} stats={stats} />}
+        {tab === 'settings' && <SettingsPanel settings={settings} onChange={(p) => api.settings.set(p)} />}
+        {tab === 'logs' && <LogPanel logs={logs} />}
+
+        {showDevices && (
           <DevicePanel
             devices={devices}
             sessions={sessions}
@@ -266,9 +269,9 @@ export function App() {
               void api.settings.set({ favoriteDevices: fav });
             }}
             onMediaControl={(d, action) => api.sessions.mediaControl(d.id, action)}
-            connectLabel={tab === 'media' ? 'Play here' : 'Mirror here'}
+            connectLabel={tab === 'media' ? 'Play here' : 'Stream here'}
           />
-        </aside>
+        )}
       </main>
 
       <StatusBar stats={stats} sessions={sessions} active={captureState.active} paused={captureState.paused} busy={busy} error={error} onDismissError={() => setError(null)} onStop={stopAll} onPause={togglePause} />
