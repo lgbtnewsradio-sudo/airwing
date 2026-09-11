@@ -16,6 +16,8 @@
   input { font: inherit; font-size: 24px; letter-spacing: .3em; text-align: center; width: 220px; padding: 10px; border-radius: 8px; border: 1px solid #2a3345; background: #0f1219; color: #fff; }
   #hud { position: absolute; top: 12px; right: 12px; font-size: 12px; color: #8a94a8; background: rgba(0,0,0,.5); padding: 4px 8px; border-radius: 6px; opacity: 0; transition: opacity .3s; }
   body:hover #hud { opacity: 1; }
+  #mutedNote { display: none; position: absolute; bottom: 0; left: 0; right: 0; align-items: center; justify-content: center; gap: 14px; padding: 9px 14px; background: rgba(10,13,19,.86); border-top: 1px solid #2a3345; font-size: 13px; color: #b9c2d4; }
+  #mutedNote button { font-size: 13px; padding: 6px 12px; border-radius: 7px; background: #2f8ff0; border: none; color: #fff; cursor: pointer; }
   #audioOnly { display: none; position: absolute; inset: 0; align-items: center; justify-content: center; flex-direction: column; gap: 12px; }
   .bars { display: flex; gap: 6px; align-items: flex-end; height: 80px; }
   .bars i { width: 12px; background: #4cc2ff; border-radius: 3px; animation: bounce 1s infinite ease-in-out; }
@@ -34,6 +36,7 @@
   <button id="start" style="display:none">Tap to start watching</button>
 </div>
 <div id="hud"></div>
+<div id="mutedNote"><span>Audio is muted here to stop a feedback loop — this is the computer being captured.</span><button>Unmute anyway</button></div>
 <script>
 (function () {
   const video = document.getElementById('video');
@@ -51,6 +54,23 @@
   let needsGesture = false;
 
   function setStatus(t) { status.textContent = t; }
+
+  // Playing our own captured audio back on the machine that is capturing it feeds
+  // straight into the system-audio loopback and howls. Start muted there, and let the
+  // viewer override it if they really want sound on this machine.
+  var feedbackGuard = false;
+  function applyFeedbackGuard(msg) {
+    if (!msg.sameMachine || feedbackGuard) return;
+    feedbackGuard = true;
+    video.muted = true;
+    var bar = document.getElementById('mutedNote');
+    bar.style.display = 'flex';
+    bar.querySelector('button').onclick = function () {
+      video.muted = false;
+      bar.style.display = 'none';
+      video.play().catch(function () {});
+    };
+  }
 
   async function fetchInfo() {
     try { const r = await fetch('/api/info'); if (r.ok) { const j = await r.json(); title.textContent = j.name || 'AirWing receiver'; return j; } } catch (e) {}
@@ -134,6 +154,7 @@
         const msg = JSON.parse(ev.data);
         if (msg.type === 'meta') {
           meta = msg;
+          applyFeedbackGuard(msg);
           if (!msg.streaming) { setStatus('Connected to ' + (msg.name || 'AirWing') + '. Waiting for the stream to start…'); overlay.classList.remove('hidden'); }
           if (msg.mime && MediaSource.isTypeSupported(msg.mime)) openMse(msg.mime);
           else if (msg.mime) setStatus('Unsupported stream format: ' + msg.mime);
@@ -201,6 +222,7 @@
 
   window.__aw = { get ms() { return ms; }, get sb() { return sb; }, get queue() { return queue; }, get meta() { return meta; }, get started() { return started; }, get needsGesture() { return needsGesture; }, video };
   fetchInfo().then((info) => {
+    if (info) applyFeedbackGuard(info);
     if (info && info.requireCode && !code) { codeBox.style.display = 'block'; setStatus('Enter the code shown in AirWing'); codeInput.focus(); return; }
     connect();
   });

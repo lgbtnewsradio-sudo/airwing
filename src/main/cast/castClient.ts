@@ -105,8 +105,15 @@ export class CastClient extends EventEmitter {
     });
   }
 
+  private lastLoggedState = '';
+
   private onStatus(status: any): void {
     if (!status) return;
+    const signature = `${status.playerState}/${status.idleReason ?? ''}`;
+    if (signature !== this.lastLoggedState) {
+      this.lastLoggedState = signature;
+      log.info(this.scope, `player ${status.playerState}${status.idleReason ? ` (${status.idleReason})` : ''} at ${(status.currentTime ?? 0).toFixed(1)}s`);
+    }
     this.status = {
       playerState: status.playerState,
       currentTime: status.currentTime,

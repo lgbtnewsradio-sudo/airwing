@@ -16,6 +16,7 @@ import { randomBytes } from 'node:crypto';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { StreamHub } from './streamHub';
 import type { FragmentInfo } from '@shared/fmp4';
+import { localAddresses } from './net';
 import { log } from './logger';
 
 export const MIME: Record<string, string> = {
@@ -100,7 +101,7 @@ export class LocalServer extends EventEmitter {
           socket.destroy();
           return;
         }
-        this.wssView.handleUpgrade(req, socket, head, (ws) => this.onViewer(ws));
+        this.wssView.handleUpgrade(req, socket, head, (ws) => this.onViewer(ws, req.socket.remoteAddress));
       } else if (url.pathname === '/ws/remote') {
         if (url.searchParams.get('token') !== this.remoteToken) {
           socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
@@ -181,6 +182,25 @@ export class LocalServer extends EventEmitter {
     const url = new URL(req.url ?? '/', 'http://localhost');
     const path = url.pathname;
     this.cors(res);
+    // Log what receivers actually fetch. A receiver that stalls is usually asking for a
+    // segment we already dropped, and without this there is no way to see it.
+    if (path.startsWith('/hls/') || path.startsWith('/media/')) {
+      const started = Date.now();
+      let bytes = 0;
+      const origWrite = res.write.bind(res);
+      const origEnd = res.end.bind(res);
+      res.write = ((chunk: any, ...rest: any[]) => {
+        if (chunk) bytes += Buffer.byteLength(chunk);
+        return (origWrite as any)(chunk, ...rest);
+      }) as typeof res.write;
+      res.end = ((chunk?: any, ...rest: any[]) => {
+        if (chunk && typeof chunk !== 'function') bytes += Buffer.byteLength(chunk);
+        const from = req.socket.remoteAddress?.replace('::ffff:', '') ?? '?';
+        log.debug('http', `${from} ${req.method} ${path}${url.search} -> ${res.statusCode} ${bytes}B ${Date.now() - started}ms`);
+        if (res.statusCode >= 400) log.warn('http', `${from} asked for ${path} and got ${res.statusCode}`);
+        return (origEnd as any)(chunk, ...rest);
+      }) as typeof res.end;
+    }
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
       res.end();
@@ -189,7 +209,7 @@ export class LocalServer extends EventEmitter {
     try {
       if (path === '/' || path === '/index.html') return await this.serveStatic(res, 'receiver/index.html');
       if (path === '/remote' || path === '/remote.html') return await this.serveStatic(res, 'receiver/remote.html');
-      if (path === '/api/info') return this.json(res, this.infoPayload());
+      if (path === '/api/info') return this.json(res, this.infoPayload(req.socket.remoteAddress));
       if (path === '/hls/master.m3u8') return this.serveMaster(res);
       if (path === '/hls/live.m3u8') return this.servePlaylist(res);
       if (path === '/hls/init.mp4') return this.serveInit(res);
@@ -205,7 +225,15 @@ export class LocalServer extends EventEmitter {
     }
   }
 
-  infoPayload(): Record<string, unknown> {
+  /** True when the viewer is the very machine doing the capturing. */
+  isSameMachine(remote?: string): boolean {
+    if (!remote) return false;
+    const ip = remote.replace('::ffff:', '');
+    if (ip === '127.0.0.1' || ip === '::1' || ip === 'localhost') return true;
+    return localAddresses().some((a) => a.address === ip);
+  }
+
+  infoPayload(remote?: string): Record<string, unknown> {
     const hub = this.opts.hub;
     return {
       name: this.opts.deviceName(),
@@ -218,7 +246,11 @@ export class LocalServer extends EventEmitter {
       encoder: hub.meta?.encoder,
       viewers: this.viewers.size,
       hlsReady: hub.segmenter.ready,
+      liveEdgeSec: Number(hub.segmenter.liveEdgeSec.toFixed(3)),
       requireCode: this.opts.requireCode(),
+      // The page mutes itself in this case: playing our own captured audio back on the
+      // capturing machine feeds straight into the loopback capture.
+      sameMachine: this.isSameMachine(remote),
     };
   }
 
@@ -346,7 +378,8 @@ export class LocalServer extends EventEmitter {
 
   // ----------------------------------------------------------------------- viewers
 
-  private onViewer(ws: WebSocket): void {
+  private onViewer(ws: WebSocket, remote?: string): void {
+    (ws as unknown as { __remote?: string }).__remote = remote;
     this.viewers.add(ws);
     this.opts.hub.viewers = this.viewers.size;
     log.info('server', `browser viewer connected (${this.viewers.size} total)`);
@@ -383,8 +416,8 @@ export class LocalServer extends EventEmitter {
     return Buffer.concat([header, Buffer.from(data.buffer, data.byteOffset, data.byteLength)]);
   }
 
-  private sendMeta(ws: WebSocket): void {
-    ws.send(JSON.stringify({ type: 'meta', ...this.infoPayload() }));
+  private sendMeta(ws: WebSocket, remote?: string): void {
+    ws.send(JSON.stringify({ type: 'meta', ...this.infoPayload(remote ?? (ws as any).__remote) }));
   }
 
   private broadcastMeta(): void {

@@ -92,7 +92,7 @@ export function ToList({ devices, sessions, settings, onToggle, onRescan, onAddM
                 <span className="row-sub">
                   {state === 'connecting' && 'Connecting…'}
                   {state === 'pairing' && 'Waiting for the code on screen'}
-                  {live && (state === 'paused' ? 'Paused' : 'Streaming')}
+                  {live && (state === 'paused' ? 'Paused' : d.kind === 'web' ? 'Streaming' : 'Streaming · a few seconds behind')}
                   {state === 'error' && (s?.error ?? 'Failed')}
                   {!state && subtitle(d)}
                 </span>

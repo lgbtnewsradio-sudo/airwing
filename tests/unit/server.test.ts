@@ -55,7 +55,7 @@ describe('local server + stream hub', () => {
 
   it('returns 404 for HLS until enough segments exist, then a valid playlist', async () => {
     expect((await fetch(base + '/hls/live.m3u8')).status).toBe(404);
-    feed(hub, 3);
+    feed(hub, 8);
     expect(hub.segmenter.ready).toBe(true);
     const res = await fetch(base + '/hls/live.m3u8');
     expect(res.status).toBe(200);
@@ -72,6 +72,23 @@ describe('local server + stream hub', () => {
     const info: any = await (await fetch(base + '/api/info')).json();
     expect(info.streaming).toBe(true);
     expect(info.codecs).toBe('avc1.640028,mp4a.40.2');
+  });
+
+  it('tells receivers to start behind the live edge so they can build a buffer', async () => {
+    const playlist = await (await fetch(base + '/hls/live.m3u8')).text();
+    // Without a cushion a Chromecast sits at the edge and rebuffers continuously.
+    const m = /#EXT-X-START:TIME-OFFSET=-([0-9.]+)/.exec(playlist);
+    expect(m).not.toBeNull();
+    expect(Number(m![1])).toBeGreaterThan(0);
+    expect(playlist).toContain('#EXT-X-TARGETDURATION:1');
+  });
+
+  it('flags the capturing machine so its own browser page mutes and cannot feed back', async () => {
+    // The test client is on loopback, i.e. the same machine that is capturing.
+    const info: any = await (await fetch(base + '/api/info')).json();
+    expect(info.sameMachine).toBe(true);
+    expect(server.isSameMachine('192.168.99.99')).toBe(false);
+    expect(server.isSameMachine('::ffff:127.0.0.1')).toBe(true);
   });
 
   it('serves a multivariant master playlist naming codecs, resolution and frame rate', async () => {

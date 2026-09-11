@@ -21,6 +21,8 @@ export interface SegmenterOptions {
   windowSize?: number;
   /** Stream has no video track: cut purely on duration. */
   audioOnly?: boolean;
+  /** How far behind the live edge receivers should start, in seconds. */
+  startOffsetSec?: number;
   onSegment?: (segment: HlsSegment) => void;
 }
 
@@ -40,6 +42,7 @@ export class HlsSegmenter {
   readonly targetDurationSec: number;
   readonly windowSize: number;
   readonly audioOnly: boolean;
+  readonly startOffsetSec: number;
   private readonly onSegment?: (segment: HlsSegment) => void;
   private init: Uint8Array | null = null;
   private pending: Uint8Array[] = [];
@@ -49,12 +52,24 @@ export class HlsSegmenter {
   private nextSequence = 0;
   readonly segments: HlsSegment[] = [];
   private discontinuity = 0;
+  private producedSec = 0;
 
   constructor(opts: SegmenterOptions = {}) {
     this.targetDurationSec = opts.targetDurationSec ?? 1;
     this.windowSize = opts.windowSize ?? 8;
     this.audioOnly = !!opts.audioOnly;
+    this.startOffsetSec = opts.startOffsetSec ?? 0;
     this.onSegment = opts.onSegment;
+  }
+
+  /** Total media currently advertised in the playlist. */
+  get totalDurationSec(): number {
+    return this.segments.reduce((sum, s) => sum + s.durationSec, 0);
+  }
+
+  /** Media timeline position of the live edge, counting segments already evicted. */
+  get liveEdgeSec(): number {
+    return this.producedSec;
   }
 
   get initSegment(): Uint8Array | null {
@@ -97,6 +112,7 @@ export class HlsSegmenter {
     this.pendingDurationUs = 0;
     this.pendingVideoDurationUs = 0;
     this.pendingHasVideo = false;
+    this.producedSec += segment.durationSec;
     this.segments.push(segment);
     while (this.segments.length > this.windowSize) this.segments.shift();
     this.onSegment?.(segment);
@@ -117,6 +133,10 @@ export class HlsSegmenter {
   }
 
   playlist(baseUrl = ''): string {
+    // Start playback a few segments behind the live edge. Pinned to the edge, a receiver
+    // has no headroom and rebuffers continuously (Chromecast oscillates PLAYING/BUFFERING
+    // and shows a frozen picture); a small cushion makes it play smoothly.
+    const cushion = Math.min(this.startOffsetSec, Math.max(0, this.totalDurationSec - this.targetDurationSec));
     const lines = [
       '#EXTM3U',
       '#EXT-X-VERSION:7',
@@ -124,8 +144,9 @@ export class HlsSegmenter {
       `#EXT-X-MEDIA-SEQUENCE:${this.segments[0]?.sequence ?? 0}`,
       `#EXT-X-DISCONTINUITY-SEQUENCE:${this.discontinuity}`,
       '#EXT-X-INDEPENDENT-SEGMENTS',
-      `#EXT-X-MAP:URI="${baseUrl}init.mp4"`,
     ];
+    if (cushion > 0) lines.push(`#EXT-X-START:TIME-OFFSET=-${cushion.toFixed(3)},PRECISE=NO`);
+    lines.push(`#EXT-X-MAP:URI="${baseUrl}init.mp4"`);
     for (const s of this.segments) {
       lines.push(`#EXTINF:${s.durationSec.toFixed(3)},`);
       lines.push(`${baseUrl}seg-${s.sequence}.m4s`);
@@ -140,5 +161,6 @@ export class HlsSegmenter {
     this.pendingVideoDurationUs = 0;
     this.pendingHasVideo = false;
     this.segments.length = 0;
+    this.producedSec = 0;
   }
 }

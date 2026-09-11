@@ -38,7 +38,7 @@ Grab `AirWing-<version>-win-x64.exe` (installer) or the portable `.zip` from the
 Silent install for managed rollouts:
 
 ```bash
-AirWing-1.0.3-win-x64.exe /S
+AirWing-1.0.4-win-x64.exe /S
 ```
 
 Settings live in `%APPDATA%\AirWing\settings.json`; AirPlay pairing keys in `credentials.json` beside it.
@@ -98,7 +98,8 @@ The mock receivers under `tests/mocks` speak the real wire protocols (HAP SRP/Ed
 ## Known limitations and honest notes
 
 * **Apple TV video does not work and cannot be made to work.** Current tvOS accepts a `/play` request from a third-party sender and then never loads the stream, because it requires Apple's proprietary FairPlay handshake. Verified by asking the Apple TV to play Apple's own reference HLS stream, which it also ignored. Use the browser receiver on a device attached to the TV instead. AirPlay *speakers* (HomePod) are unaffected.
-* **Roku / Fire TV mirroring uses HLS**, so those receivers show roughly 2–4 s of delay (fine for presentations and video, not for gaming). Use the browser receiver for near-real-time viewing.
+* **Chromecast, Roku and Fire TV mirroring uses HLS**, which puts them roughly 8 s behind live. That is the receiver's own buffering: tightening the playlist window below that brings back continuous rebuffering (measured on a Sony Bravia). Google's and Apple's own screen mirroring use proprietary low-latency transports that third-party senders cannot use. The **browser receiver runs about 0.3 s behind** and is the right choice when latency matters.
+* **Audio feedback:** opening the browser receiver on the same PC that is capturing would loop its audio back through the system-audio capture, so that page starts muted there (with a one-click override). On any other device it plays normally.
 * **HomePod and AirPlay speakers** receive the audio-only HLS stream through the AirPlay 2 video path; RAOP/RTP realtime audio is not implemented yet.
 * **Extend Desktop** relies on a third-party virtual display driver because Windows requires a signed IddCx driver to create displays.
 * The AirPlay 2 implementation was validated against mock receivers and a HomePod mini/Apple TV on a home network; other brands may need tweaks — please open an issue with the `Logs` tab output.

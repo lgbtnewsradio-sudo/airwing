@@ -35,7 +35,18 @@ export class StreamHub extends EventEmitter {
 
   setMeta(meta: StreamMeta): void {
     this.meta = meta;
-    this.segmenter = new HlsSegmenter({ targetDurationSec: meta.audioOnly ? 2 : 1, windowSize: 10, audioOnly: meta.audioOnly });
+    // HLS tuning, measured against a Chromecast (Sony Bravia). A receiver pinned to the
+    // live edge rebuffers forever, and a deep window lets it start far back, so both the
+    // window and the start cushion are kept small: this combination played for 98 s with
+    // no rebuffering at roughly 8 s behind live. A 4-segment window rebuffered 22 times,
+    // and no cushion at all was worse still (the receiver picks its own drifting start).
+    // Browser viewers are fed per frame over WebSocket and are unaffected by any of this.
+    this.segmenter = new HlsSegmenter({
+      targetDurationSec: Number(process.env.AIRWING_HLS_SEG ?? 1),
+      windowSize: Number(process.env.AIRWING_HLS_WINDOW ?? 8),
+      audioOnly: meta.audioOnly,
+      startOffsetSec: Number(process.env.AIRWING_HLS_CUSHION ?? 1),
+    });
     this.init = null;
     this.gop = [];
     this.active = true;
