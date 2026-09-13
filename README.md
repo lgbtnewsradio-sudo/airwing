@@ -38,7 +38,7 @@ Grab `AirWing-<version>-win-x64.exe` (installer) or the portable `.zip` from the
 Silent install for managed rollouts:
 
 ```bash
-AirWing-1.0.4-win-x64.exe /S
+AirWing-1.0.5-win-x64.exe /S
 ```
 
 Settings live in `%APPDATA%\AirWing\settings.json`; AirPlay pairing keys in `credentials.json` beside it.

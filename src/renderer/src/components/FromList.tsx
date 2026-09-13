@@ -42,7 +42,7 @@ export function FromList({ sources, config, onChange, onPickMedia, onOpenExtend,
 
   if (showApps) {
     return (
-      <section className="list">
+      <section className="list from-list">
         <div className="list-head">
           <button className="back" onClick={() => setShowApps(false)}>
             ‹ From
@@ -70,7 +70,7 @@ export function FromList({ sources, config, onChange, onPickMedia, onOpenExtend,
   const selectedWindow = config.sourceKind === 'window' ? windows.find((w) => w.id === config.sourceId) : undefined;
 
   return (
-    <section className="list">
+    <section className="list from-list">
       <div className="list-head">
         <span className="list-title">From</span>
       </div>

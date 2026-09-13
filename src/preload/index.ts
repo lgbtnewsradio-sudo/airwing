@@ -32,7 +32,7 @@ const api = {
   devices: {
     list: (): Promise<Device[]> => ipcRenderer.invoke(IPC.devicesList),
     rescan: (): Promise<void> => ipcRenderer.invoke(IPC.devicesRescan),
-    addManual: (input: { host: string; port?: number; kind: DeviceKind; name?: string }): Promise<Device> => ipcRenderer.invoke(IPC.devicesAddManual, input),
+    addManual: (input: { host: string; port?: number; kind: DeviceKind | 'auto'; name?: string }): Promise<Device> => ipcRenderer.invoke(IPC.devicesAddManual, input),
     removeManual: (id: string): Promise<void> => ipcRenderer.invoke(IPC.devicesRemoveManual, id),
     forget: (id: string): Promise<void> => ipcRenderer.invoke(IPC.devicesForget, id),
     onChange: (cb: (devices: Device[]) => void) => on<Device[]>(IPC.devicesChanged, cb),

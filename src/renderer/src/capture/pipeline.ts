@@ -96,6 +96,15 @@ export class CapturePipeline {
   private audioOnly = false;
   private muxerTimer: number | null = null;
   private statsTimer: number | null = null;
+  /** True when cropping or scaling means frames must go through the canvas. */
+  private canvasRequired = false;
+  /**
+   * Serialises start/stop. Both are async and were independently reachable (the stop and
+   * start IPC commands arrive on separate callbacks), so an in-flight teardown could run
+   * its second half *after* a new start had built a fresh session and dismantle it —
+   * capture appeared to start and instantly died.
+   */
+  private opChain: Promise<unknown> = Promise.resolve();
 
   constructor(
     private readonly send: (data: Uint8Array, info: FragmentInfo) => void,
@@ -115,8 +124,26 @@ export class CapturePipeline {
     return Math.round((performance.now() - this.startMs) * 1000);
   }
 
-  async start(config: StreamConfig): Promise<void> {
-    if (this.running) await this.stop();
+  /** Public entry points queue behind each other; internal callers use the *Internal forms. */
+  start(config: StreamConfig): Promise<void> {
+    return this.enqueue(() => this.startInternal(config));
+  }
+
+  stop(reason?: string): Promise<void> {
+    return this.enqueue(() => this.stopInternal(reason));
+  }
+
+  private enqueue<T>(op: () => Promise<T>): Promise<T> {
+    const run = this.opChain.then(op, op);
+    this.opChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  private async startInternal(config: StreamConfig): Promise<void> {
+    if (this.running) await this.stopInternal();
     this.config = config;
     this.stopping = false;
     this.dropped = 0;
@@ -154,7 +181,7 @@ export class CapturePipeline {
       this.onState({ active: true, paused: false });
     } catch (err) {
       this.running = false;
-      await this.stop((err as Error).message);
+      await this.stopInternal((err as Error).message);
       throw err;
     }
   }
@@ -226,7 +253,8 @@ export class CapturePipeline {
     const limit = RESOLUTION_LIMITS[config.resolution] ?? 1080;
     const scale = Math.min(1, limit / Math.min(srcW, srcH), 4096 / Math.max(srcW, srcH));
     this.target = { width: even(srcW * scale), height: even(srcH * scale) };
-    if (this.crop || scale < 1) {
+    this.canvasRequired = !!this.crop || scale < 1;
+    if (this.canvasRequired) {
       this.canvas = new OffscreenCanvas(this.target.width, this.target.height);
       this.ctx = this.canvas.getContext('2d', { alpha: false, desynchronized: true });
     }
@@ -350,7 +378,16 @@ export class CapturePipeline {
 
   private render(source: VideoFrame, timestamp: number, paused: boolean): VideoFrame {
     const duration = this.frameIntervalUs;
-    if (!paused && !this.canvas) return new VideoFrame(source, { timestamp, duration });
+    if (!paused && !this.canvasRequired) {
+      // Drop the canvas the pause banner needed, so we return to the zero-copy path. Left
+      // in place, a single pause sent every later frame through drawImage for the rest of
+      // the session.
+      if (this.canvas) {
+        this.canvas = null;
+        this.ctx = null;
+      }
+      return new VideoFrame(source, { timestamp, duration });
+    }
     if (!this.canvas) {
       this.canvas = new OffscreenCanvas(this.target.width, this.target.height);
       this.ctx = this.canvas.getContext('2d', { alpha: false, desynchronized: true });
@@ -576,7 +613,7 @@ export class CapturePipeline {
     this.onState({ active: this.running, paused });
   }
 
-  async stop(reason?: string): Promise<void> {
+  private async stopInternal(reason?: string): Promise<void> {
     if (this.stopping) return;
     this.stopping = true;
     const wasRunning = this.running;

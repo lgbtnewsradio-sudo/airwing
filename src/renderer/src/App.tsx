@@ -135,18 +135,28 @@ export function App() {
   }, [sources, config.sourceKind, config.sourceId, updateConfig]);
 
   // Choosing a source is the whole action: capture starts (and restarts on a new source)
-  // by itself, so picking a destination is the only other step.
+  // by itself, so picking a destination is the only other step. `selectTick` rises on every
+  // deliberate pick, so re-picking the source you already had (after Stop, say) starts it
+  // again — without that, capture only followed a *change* of source and Stop was a dead end.
   const autoStarted = useRef('');
+  const [selectTick, setSelectTick] = useState(0);
+  const selectSource = useCallback(
+    (patch: Partial<StreamConfig>) => {
+      updateConfig(patch);
+      setSelectTick((t) => t + 1);
+    },
+    [updateConfig],
+  );
   useEffect(() => {
     if (view !== 'main') return;
     const ready = config.sourceKind === 'audio' || (config.sourceKind === 'region' ? !!config.region : config.sourceKind === 'media' ? !!config.mediaPath : !!config.sourceId);
     if (!ready) return;
-    const signature = `${config.sourceKind}:${config.sourceId ?? ''}:${config.mediaPath ?? ''}:${JSON.stringify(config.region ?? null)}`;
+    const signature = `${selectTick}:${config.sourceKind}:${config.sourceId ?? ''}:${config.mediaPath ?? ''}:${JSON.stringify(config.region ?? null)}`;
     if (autoStarted.current === signature) return;
     autoStarted.current = signature;
     void api.capture.start({ ...configRef.current }).catch((err) => setError((err as Error).message));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [view, config.sourceKind, config.sourceId, config.region, config.mediaPath]);
+  }, [view, selectTick, config.sourceKind, config.sourceId, config.region, config.mediaPath]);
 
   const toggleDevice = useCallback(
     async (device: Device) => {
@@ -159,6 +169,10 @@ export function App() {
           return;
         }
         const direct = media && config.sourceKind === 'media' && (config.mediaMode === 'direct' || (config.mediaMode !== 'transcode' && isDirectPlayable(media)));
+        // Picking a destination implies "send this there", so bring capture back if it was
+        // stopped. Without this the connect sat waiting on a capture nobody restarted and
+        // failed ~15 s later with "the capture did not start".
+        if (!direct && !captureState.active) await api.capture.start({ ...configRef.current });
         const info = direct ? await api.sessions.connect(device.id, { type: 'file', path: media!.path }) : await api.sessions.connect(device.id, { type: 'live' });
         if (info.state === 'error' && info.error) setError(`${device.name}: ${info.error}`);
       } catch (err) {
@@ -167,16 +181,16 @@ export function App() {
         setBusyDevice(null);
       }
     },
-    [api, sessions, media, config.sourceKind, config.mediaMode],
+    [api, sessions, media, config.sourceKind, config.mediaMode, captureState.active],
   );
 
   const pickMedia = useCallback(async () => {
     const f = await api.media.pick();
     if (f) {
       setMedia({ path: f.path, name: f.name, mime: f.mime, size: f.size });
-      updateConfig({ sourceKind: 'media', mediaPath: f.path });
+      selectSource({ sourceKind: 'media', mediaPath: f.path });
     }
-  }, [api, updateConfig]);
+  }, [api, selectSource]);
 
   const changeVolume = useCallback(
     (v: number) => {
@@ -262,7 +276,7 @@ export function App() {
       <main className="body">
         {view === 'main' && (
           <>
-            <FromList sources={sources} config={config} onChange={updateConfig} onPickMedia={pickMedia} onOpenExtend={() => setView('extend')} mediaName={media?.name} />
+            <FromList sources={sources} config={config} onChange={selectSource} onPickMedia={pickMedia} onOpenExtend={() => setView('extend')} mediaName={media?.name} />
             <ToList
               devices={devices}
               sessions={sessions}
@@ -287,7 +301,18 @@ export function App() {
             {view === 'settings' && <SettingsPanel settings={settings} onChange={(p) => api.settings.set(p)} />}
             {view === 'browser' && <ReceiverPanel info={receiver} settings={settings} onSettings={(p) => api.settings.set(p)} stats={stats} />}
             {view === 'logs' && <LogPanel logs={logs} />}
-            {view === 'extend' && <ExtendPanel sources={sources} onMirrorDisplay={(displayId, sourceId) => updateConfig({ sourceKind: 'screen', sourceId, displayId })} />}
+            {view === 'extend' && (
+              <ExtendPanel
+                sources={sources}
+                onMirrorDisplay={(displayId, sourceId) => {
+                  // Return to the main view as well: the auto-start effect deliberately
+                  // ignores sub-views, so picking a display here used to do nothing at all
+                  // until the user happened to press Back.
+                  selectSource({ sourceKind: 'screen', sourceId, displayId, region: undefined });
+                  setView('main');
+                }}
+              />
+            )}
           </div>
         )}
       </main>

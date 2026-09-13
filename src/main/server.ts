@@ -124,6 +124,9 @@ export class LocalServer extends EventEmitter {
           });
         });
         this.server = server;
+        // A listening server with no 'error' handler turns any later socket error into an
+        // uncaught exception, which would take the whole app down.
+        server.on('error', (err) => log.error('server', `server error: ${err.message}`));
         this.port = (server.address() as { port: number }).port;
         log.info('server', `listening on ${this.opts.bindAddress || '0.0.0.0'}:${this.port}`);
         return this.port;
@@ -213,6 +216,7 @@ export class LocalServer extends EventEmitter {
       if (path === '/hls/master.m3u8') return this.serveMaster(res);
       if (path === '/hls/live.m3u8') return this.servePlaylist(res);
       if (path === '/hls/init.mp4') return this.serveInit(res);
+      if (/^\/hls\/init-\d+\.mp4$/.test(path)) return this.serveInit(res, parseInt(/\d+/.exec(path)![0], 10));
       if (path.startsWith('/hls/seg-')) return this.serveSegment(res, path);
       if (path.startsWith('/media/')) return await this.serveMedia(req, res, path);
       if (path === '/healthz') return this.json(res, { ok: true });
@@ -308,8 +312,11 @@ export class LocalServer extends EventEmitter {
     res.end(lines.join('\n') + '\n');
   }
 
-  private serveInit(res: http.ServerResponse): void {
-    const init = this.opts.hub.segmenter.initSegment;
+  private serveInit(res: http.ServerResponse, version?: number): void {
+    // Versioned URIs: when the encoder re-initialises, the new init must not be served
+    // under a URI a receiver already fetched, or it decodes new segments against the old
+    // configuration and shows green blocks.
+    const init = version === undefined ? this.opts.hub.segmenter.initSegment : this.opts.hub.segmenter.getInit(version);
     if (!init) {
       res.writeHead(404);
       res.end();
@@ -364,7 +371,7 @@ export class LocalServer extends EventEmitter {
         res.end();
         return;
       }
-      createReadStream(media.path, { start, end }).pipe(res);
+      this.pipeFile(createReadStream(media.path, { start, end }), res, media.path);
       return;
     }
     headers['Content-Length'] = size;
@@ -373,7 +380,28 @@ export class LocalServer extends EventEmitter {
       res.end();
       return;
     }
-    createReadStream(media.path).pipe(res);
+    this.pipeFile(createReadStream(media.path), res, media.path);
+  }
+
+  /**
+   * Stream a file to a response with both ends guarded. A bare `.pipe()` leaves the read
+   * stream's 'error' unhandled, so a drive being unplugged (or the file being moved) part
+   * way through a cast was an uncaught exception that killed the app. It also leaked the
+   * file descriptor when a receiver aborted, because pipe() unpipes without destroying.
+   */
+  private pipeFile(stream: ReturnType<typeof createReadStream>, res: http.ServerResponse, path: string): void {
+    const cleanup = () => {
+      if (!stream.destroyed) stream.destroy();
+    };
+    stream.on('error', (err: NodeJS.ErrnoException) => {
+      log.warn('server', `read failed for ${path}: ${err.message}`);
+      if (!res.headersSent) res.writeHead(500);
+      res.end();
+      cleanup();
+    });
+    res.on('close', cleanup);
+    res.on('error', cleanup);
+    stream.pipe(res);
   }
 
   // ----------------------------------------------------------------------- viewers
@@ -455,6 +483,12 @@ export class LocalServer extends EventEmitter {
 
   private onRemote(ws: WebSocket): void {
     this.remotes.add(ws);
+    // Without this, a phone that drops off Wi-Fi emits 'error' with no listener, which is
+    // an uncaught exception that takes the entire app down with it.
+    ws.on('error', () => {
+      this.remotes.delete(ws);
+      ws.close();
+    });
     ws.on('message', (raw) => {
       try {
         const cmd = JSON.parse(raw.toString()) as RemoteCommand;

@@ -8,11 +8,29 @@ interface Props {
 
 export function ExtendPanel({ sources, onMirrorDisplay }: Props) {
   const [info, setInfo] = useState<ExtendDesktopInfo | null>(null);
-  const refresh = () => window.airwing.sources.extendInfo().then(setInfo);
   useEffect(() => {
+    // Each refresh spawns powershell.exe to look for a virtual display driver, so poll
+    // slowly, never overlap two probes, and stop touching state once unmounted.
+    let alive = true;
+    let inFlight = false;
+    const refresh = async () => {
+      if (!alive || inFlight) return;
+      inFlight = true;
+      try {
+        const next = await window.airwing.sources.extendInfo();
+        if (alive) setInfo(next);
+      } catch {
+        /* the probe is best-effort; keep the last known state */
+      } finally {
+        inFlight = false;
+      }
+    };
     void refresh();
-    const t = setInterval(refresh, 5000);
-    return () => clearInterval(t);
+    const t = setInterval(() => void refresh(), 20000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
   }, []);
   const virtualScreens = sources.filter((s) => s.kind === 'screen' && s.isVirtualDisplay);
 

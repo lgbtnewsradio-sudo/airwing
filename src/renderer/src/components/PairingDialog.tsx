@@ -22,6 +22,9 @@ export function PairingDialog({ prompt, onStart, onFinish, onCancel, onDone }: P
     let cancelled = false;
     setPhase('starting');
     setPin('');
+    // Deliberately not clearing `error` here: a rejected code bumps `attempt` to fetch a
+    // fresh code, and wiping the message at that point removed the very explanation the
+    // user needs ("that code was not accepted"). The Try again button clears it instead.
     onStart()
       .then(() => {
         if (!cancelled) setPhase('enter');
@@ -70,7 +73,13 @@ export function PairingDialog({ prompt, onStart, onFinish, onCancel, onDone }: P
             Cancel
           </button>
           {phase === 'error' ? (
-            <button className="primary" onClick={() => setAttempt((a) => a + 1)}>
+            <button
+              className="primary"
+              onClick={() => {
+                setError('');
+                setAttempt((a) => a + 1);
+              }}
+            >
               Try again
             </button>
           ) : (

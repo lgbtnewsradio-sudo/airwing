@@ -1,4 +1,28 @@
 import { networkInterfaces } from 'node:os';
+import net from 'node:net';
+
+/** True when something accepts a TCP connection on host:port within the timeout. */
+export function probePort(host: string, port: number, timeoutMs = 1500): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = new net.Socket();
+    let settled = false;
+    const done = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(ok);
+    };
+    socket.setTimeout(timeoutMs);
+    socket.once('connect', () => done(true));
+    socket.once('timeout', () => done(false));
+    socket.once('error', () => done(false));
+    try {
+      socket.connect(port, host);
+    } catch {
+      done(false);
+    }
+  });
+}
 
 export interface LocalAddress {
   address: string;

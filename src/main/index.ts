@@ -38,10 +38,16 @@ import { Discovery, deviceKey } from './discovery';
 import { StreamHub } from './streamHub';
 import { LocalServer } from './server';
 import { SessionManager } from './sessions';
-import { localAddresses, preferredAddress } from './net';
+import { localAddresses, preferredAddress, probePort } from './net';
 
 const userDataArg = process.argv.find((a) => a.startsWith('--user-data-dir='));
 if (userDataArg) app.setPath('userData', userDataArg.slice('--user-data-dir='.length));
+
+// Last line of defence. This is a tray app that people leave running for days while it
+// streams; a stray rejection from a dropped socket or an unplugged drive must never take
+// the whole thing down silently. Anything that lands here is a bug worth seeing in the log.
+process.on('uncaughtException', (err) => log.error('app', `uncaught exception: ${err?.stack ?? err}`));
+process.on('unhandledRejection', (reason) => log.error('app', `unhandled rejection: ${reason instanceof Error ? (reason.stack ?? reason.message) : String(reason)}`));
 
 const isDev = !app.isPackaged;
 const gotLock = app.requestSingleInstanceLock();
@@ -129,7 +135,10 @@ function createWindow(): BrowserWindow {
     if (!settings.get().startMinimized || process.argv.includes('--show')) win.show();
   });
   win.on('close', (e) => {
-    if (!quitting && (hub.active || sessions.count > 0)) {
+    // Only stay resident when something is actually receiving. Capture now starts on its
+    // own as soon as a source is selected, so keying this off hub.active alone meant the
+    // close button could never actually close the app.
+    if (!quitting && sessions.count + server.viewerCount > 0) {
       e.preventDefault();
       win.hide();
       if (settings.get().showNotifications && Notification.isSupported()) {
@@ -223,9 +232,8 @@ let captureRestarts = 0;
 let restartTimer: NodeJS.Timeout | null = null;
 
 /** Bring capture back after it ended unexpectedly, as long as someone is still watching. */
-function maybeRestartCapture(reason: string): void {
+function maybeRestartCapture(reason: string, watchers: number): void {
   if (restartTimer || quitting) return;
-  const watchers = sessions.count + server.viewerCount;
   if (watchers === 0 || !currentConfig) return;
   if (captureRestarts >= 5) {
     log.error('capture', `capture keeps stopping (${reason}); giving up after ${captureRestarts} restarts`);
@@ -397,25 +405,39 @@ function receiverInfo(): ReceiverInfo {
 function registerIpc(): void {
   ipcMain.handle(IPC.devicesList, () => discovery.list());
   ipcMain.handle(IPC.devicesRescan, () => discovery.rescan());
-  ipcMain.handle(IPC.devicesAddManual, async (_e, input: { host: string; port?: number; kind: 'airplay' | 'cast'; name?: string }) => {
+  ipcMain.handle(IPC.devicesAddManual, async (_e, input: { host: string; port?: number; kind: 'airplay' | 'cast' | 'auto'; name?: string }) => {
     const host = input.host.trim();
-    const port = input.port || (input.kind === 'cast' ? 8009 : 7000);
+    let kind: 'airplay' | 'cast' = input.kind === 'auto' ? 'airplay' : input.kind;
+    let port = input.port;
+    if (input.kind === 'auto' && !port) {
+      // Ask the host which protocol it speaks. A bare IP used to be assumed to be AirPlay
+      // on 7000, so a Chromecast added that way could never connect to anything.
+      if (await probePort(host, 8009)) {
+        kind = 'cast';
+        port = 8009;
+      } else {
+        kind = 'airplay';
+        port = 7000;
+      }
+    }
+    port = port || (kind === 'cast' ? 8009 : 7000);
     const device: Device = {
-      id: `${input.kind}:${host}:${port}`,
-      kind: input.kind,
-      name: input.name?.trim() || `${host} (${input.kind === 'cast' ? 'Cast' : 'AirPlay'})`,
+      id: `${kind}:${host}:${port}`,
+      kind,
+      name: input.name?.trim() || `${host} (${kind === 'cast' ? 'Cast' : 'AirPlay'})`,
       host,
       port,
       txt: {},
       manual: true,
       lastSeen: Date.now(),
-      caps: { video: true, audio: true, pairingRequired: false, transientPairing: true, paired: !!credentials.get(`${input.kind}:${host}`) },
+      caps: { video: true, audio: true, pairingRequired: false, transientPairing: true, paired: !!credentials.get(`${kind}:${host}`) },
     };
     discovery.addManual(device);
     const s = settings.get();
-    if (!s.manualDevices.some((m) => m.host === host && m.kind === input.kind)) {
-      settings.set({ manualDevices: [...s.manualDevices, { host, port, kind: input.kind, name: input.name }] });
+    if (!s.manualDevices.some((m) => m.host === host && m.kind === kind)) {
+      settings.set({ manualDevices: [...s.manualDevices, { host, port, kind, name: input.name }] });
     }
+    log.info('devices', `added ${device.name} manually as ${kind} on port ${port}`);
     return device;
   });
   ipcMain.handle(IPC.devicesRemoveManual, (_e, id: string) => {
@@ -455,6 +477,10 @@ function registerIpc(): void {
     if (state.error) log.error('capture', state.error);
     else if (state.reason && !state.active) log.info('capture', `capture stopped: ${state.reason}`);
     if (typeof state.dropped === 'number') hub.reportDropped(state.dropped);
+    // Count who was watching *before* ending the stream: hub.end() synchronously drops
+    // every live session, so asking afterwards always said "nobody" and the auto-restart
+    // below never fired for the case it exists for — a TV-only user.
+    const watchers = sessions.count + server.viewerCount;
     if (!state.active && hub.active) hub.end();
     if (state.active) {
       captureRestarts = 0;
@@ -463,7 +489,7 @@ function registerIpc(): void {
       // Windows can end a capture on its own (display change, session switch, a source
       // that goes away). Anyone still watching would just see a frozen picture, so bring
       // the capture back instead of leaving it dead.
-      maybeRestartCapture(state.reason);
+      maybeRestartCapture(state.reason, watchers);
     }
     refreshTray();
     send(IPC.streamStats, hub.stats(sessions.count));

@@ -54,8 +54,13 @@ export class SessionManager extends EventEmitter {
     return this.sessions.get(deviceId)?.info;
   }
 
+  /**
+   * Receivers actually being streamed to. Failed sessions stay in the list so the user can
+   * see why, but they must not count as watchers: that inflated the tray label and made
+   * the capture auto-restart on behalf of a receiver that never connected.
+   */
   get count(): number {
-    return this.sessions.size;
+    return [...this.sessions.values()].filter((s) => s.info.state !== 'error' && s.info.state !== 'stopped').length;
   }
 
   private update(session: Session, patch: Partial<SessionInfo>): void {
@@ -140,6 +145,12 @@ export class SessionManager extends EventEmitter {
     });
     client.on('close', () => {
       if (!session.stopping && this.sessions.get(device.id) === session) this.setState(session, 'error', 'connection closed by receiver');
+    });
+    // The receiver app closed (someone cast something else from their phone, or the TV
+    // switched input). Without this the session stayed listed as streaming forever and a
+    // status poll kept ticking against a receiver that had moved on.
+    client.on('ended', () => {
+      if (!session.stopping && this.sessions.get(device.id) === session) void this.disconnect(device.id, 'receiver ended the session');
     });
     client.on('error', (err: Error) => {
       if (!session.stopping) this.setState(session, 'error', err.message);

@@ -243,7 +243,11 @@ export class Discovery extends EventEmitter {
       if (!device) continue;
       const prev = this.devices.get(device.id);
       if (!prev || JSON.stringify({ ...prev, lastSeen: 0 }) !== JSON.stringify({ ...device, lastSeen: 0 })) changed = true;
-      this.devices.set(device.id, device);
+      // Keep the manual flag when a hand-added receiver is later discovered over mDNS.
+      // Losing it meant prune() deleted a device the user had added by IP as soon as the
+      // receiver was switched off, and it never came back without a restart.
+      const manual = this.manual.has(device.id) || prev?.manual;
+      this.devices.set(device.id, manual ? { ...device, manual: true } : device);
     }
     if (changed) this.emit('change', this.list());
   }
@@ -312,6 +316,12 @@ export class Discovery extends EventEmitter {
     }
     for (const [name, svc] of this.services) {
       if (now - svc.seen > stale) this.services.delete(name);
+    }
+    // `hosts` records an A record for every name seen on the network, so on a busy LAN it
+    // would grow for the whole life of the app. Keep only names our services still point at.
+    if (this.hosts.size > 256) {
+      const wanted = new Set([...this.services.values()].map((s) => s.target).filter((t): t is string => !!t));
+      for (const name of [...this.hosts.keys()]) if (!wanted.has(name)) this.hosts.delete(name);
     }
     if (changed) this.emit('change', this.list());
   }

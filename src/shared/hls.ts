@@ -12,6 +12,10 @@ export interface HlsSegment {
   durationSec: number;
   data: Uint8Array;
   createdAt: number;
+  /** Which init segment this media segment must be decoded against. */
+  initVersion: number;
+  /** True when this segment is the first one after an encoder re-initialisation. */
+  discontinuity: boolean;
 }
 
 export interface SegmenterOptions {
@@ -23,6 +27,14 @@ export interface SegmenterOptions {
   audioOnly?: boolean;
   /** How far behind the live edge receivers should start, in seconds. */
   startOffsetSec?: number;
+  /**
+   * Continue numbering from a previous segmenter. HLS requires the media sequence to
+   * never go backwards for a given playlist URL, and capture can stop and restart under
+   * a receiver that is still polling, so the counters have to survive a restart.
+   */
+  startSequence?: number;
+  startDiscontinuitySequence?: number;
+  startInitVersion?: number;
   onSegment?: (segment: HlsSegment) => void;
 }
 
@@ -38,6 +50,10 @@ function concat(parts: Uint8Array[]): Uint8Array {
   return out;
 }
 
+export function initUri(version: number): string {
+  return `init-${version}.mp4`;
+}
+
 export class HlsSegmenter {
   readonly targetDurationSec: number;
   readonly windowSize: number;
@@ -45,13 +61,18 @@ export class HlsSegmenter {
   readonly startOffsetSec: number;
   private readonly onSegment?: (segment: HlsSegment) => void;
   private init: Uint8Array | null = null;
+  /** Every init segment still referenced by the window, keyed by version. */
+  private inits = new Map<number, Uint8Array>();
+  private initVersion: number;
+  private pendingDiscontinuity = false;
   private pending: Uint8Array[] = [];
   private pendingDurationUs = 0;
   private pendingVideoDurationUs = 0;
   private pendingHasVideo = false;
-  private nextSequence = 0;
+  private nextSequence: number;
   readonly segments: HlsSegment[] = [];
-  private discontinuity = 0;
+  /** Number of discontinuities that have already scrolled out of the window. */
+  private discontinuitySequence: number;
   private producedSec = 0;
 
   constructor(opts: SegmenterOptions = {}) {
@@ -59,7 +80,19 @@ export class HlsSegmenter {
     this.windowSize = opts.windowSize ?? 8;
     this.audioOnly = !!opts.audioOnly;
     this.startOffsetSec = opts.startOffsetSec ?? 0;
+    this.nextSequence = opts.startSequence ?? 0;
+    this.discontinuitySequence = opts.startDiscontinuitySequence ?? 0;
+    this.initVersion = opts.startInitVersion ?? 0;
     this.onSegment = opts.onSegment;
+  }
+
+  /** Counters a successor segmenter must continue from after a capture restart. */
+  get continuation(): { startSequence: number; startDiscontinuitySequence: number; startInitVersion: number } {
+    return {
+      startSequence: this.nextSequence,
+      startDiscontinuitySequence: this.discontinuitySequence,
+      startInitVersion: this.initVersion,
+    };
   }
 
   /** Total media currently advertised in the playlist. */
@@ -76,6 +109,15 @@ export class HlsSegmenter {
     return this.init;
   }
 
+  get currentInitVersion(): number {
+    return this.initVersion;
+  }
+
+  /** The init segment for a specific version, so a changed init never reuses a URI. */
+  getInit(version: number): Uint8Array | undefined {
+    return this.inits.get(version);
+  }
+
   get maxSegmentDurationSec(): number {
     return this.segments.reduce((m, s) => Math.max(m, s.durationSec), this.targetDurationSec);
   }
@@ -83,8 +125,14 @@ export class HlsSegmenter {
   push(data: Uint8Array, info: FragmentInfo): void {
     if (info.kind === 'init') {
       if (this.init && this.pending.length) this.cut();
-      if (this.init) this.discontinuity++;
+      // A new init means new decoder configuration. It must be published under its own
+      // URI with a discontinuity, otherwise receivers keep decoding new segments against
+      // the old moov and show green blocks or stall.
+      if (this.init) this.pendingDiscontinuity = true;
+      this.initVersion++;
       this.init = data;
+      this.inits.set(this.initVersion, data);
+      this.pruneInits();
       return;
     }
     const isVideoKey = info.kind === 'video' && info.keyframe;
@@ -107,15 +155,33 @@ export class HlsSegmenter {
       durationSec: Math.max(0.001, durationUs / 1e6),
       data: concat(this.pending),
       createdAt: Date.now(),
+      initVersion: this.initVersion,
+      discontinuity: this.pendingDiscontinuity,
     };
+    this.pendingDiscontinuity = false;
     this.pending = [];
     this.pendingDurationUs = 0;
     this.pendingVideoDurationUs = 0;
     this.pendingHasVideo = false;
     this.producedSec += segment.durationSec;
     this.segments.push(segment);
-    while (this.segments.length > this.windowSize) this.segments.shift();
+    while (this.segments.length > this.windowSize) {
+      const dropped = this.segments.shift()!;
+      // EXT-X-DISCONTINUITY-SEQUENCE counts the discontinuity tags that have scrolled
+      // off the front of the playlist.
+      if (dropped.discontinuity) this.discontinuitySequence++;
+    }
+    this.pruneInits();
     this.onSegment?.(segment);
+  }
+
+  /** Drop init segments no longer referenced by anything in the window. */
+  private pruneInits(): void {
+    const live = new Set(this.segments.map((s) => s.initVersion));
+    live.add(this.initVersion);
+    for (const version of [...this.inits.keys()]) {
+      if (!live.has(version)) this.inits.delete(version);
+    }
   }
 
   /** Force-cut whatever is pending (used when the stream ends). */
@@ -141,13 +207,18 @@ export class HlsSegmenter {
       '#EXTM3U',
       '#EXT-X-VERSION:7',
       `#EXT-X-TARGETDURATION:${Math.ceil(this.maxSegmentDurationSec)}`,
-      `#EXT-X-MEDIA-SEQUENCE:${this.segments[0]?.sequence ?? 0}`,
-      `#EXT-X-DISCONTINUITY-SEQUENCE:${this.discontinuity}`,
+      `#EXT-X-MEDIA-SEQUENCE:${this.segments[0]?.sequence ?? this.nextSequence}`,
+      `#EXT-X-DISCONTINUITY-SEQUENCE:${this.discontinuitySequence}`,
       '#EXT-X-INDEPENDENT-SEGMENTS',
     ];
     if (cushion > 0) lines.push(`#EXT-X-START:TIME-OFFSET=-${cushion.toFixed(3)},PRECISE=NO`);
-    lines.push(`#EXT-X-MAP:URI="${baseUrl}init.mp4"`);
+    let currentInit = -1;
     for (const s of this.segments) {
+      if (s.discontinuity && currentInit !== -1) lines.push('#EXT-X-DISCONTINUITY');
+      if (s.initVersion !== currentInit) {
+        lines.push(`#EXT-X-MAP:URI="${baseUrl}${initUri(s.initVersion)}"`);
+        currentInit = s.initVersion;
+      }
       lines.push(`#EXTINF:${s.durationSec.toFixed(3)},`);
       lines.push(`${baseUrl}seg-${s.sequence}.m4s`);
     }
@@ -156,10 +227,12 @@ export class HlsSegmenter {
 
   reset(): void {
     this.init = null;
+    this.inits.clear();
     this.pending = [];
     this.pendingDurationUs = 0;
     this.pendingVideoDurationUs = 0;
     this.pendingHasVideo = false;
+    this.pendingDiscontinuity = false;
     this.segments.length = 0;
     this.producedSec = 0;
   }

@@ -59,7 +59,7 @@ test('starts a real screen capture, encodes H.264 and serves HLS + WebSocket vie
   // HLS becomes ready after a couple of segments.
   await expect.poll(async () => (await fetch(baseUrl + '/hls/live.m3u8')).status, { timeout: 30000 }).toBe(200);
   const playlist = await (await fetch(baseUrl + '/hls/live.m3u8')).text();
-  expect(playlist).toContain('#EXT-X-MAP:URI="init.mp4"');
+  expect(playlist).toMatch(/#EXT-X-MAP:URI="init-\d+\.mp4"/);
   const init = Buffer.from(await (await fetch(baseUrl + '/hls/init.mp4')).arrayBuffer());
   expect(init.subarray(4, 8).toString()).toBe('ftyp');
   expect(init.includes('avcC')).toBe(true);

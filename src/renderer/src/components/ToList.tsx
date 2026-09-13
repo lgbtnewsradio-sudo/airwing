@@ -7,7 +7,7 @@ interface Props {
   settings: AppSettings;
   onToggle: (d: Device) => void;
   onRescan: () => void;
-  onAddManual: (input: { host: string; port?: number; kind: DeviceKind; name?: string }) => Promise<Device>;
+  onAddManual: (input: { host: string; port?: number; kind: DeviceKind | 'auto'; name?: string }) => Promise<Device>;
   onForget: (d: Device) => void;
   onFavorite: (d: Device) => void;
   busyDeviceId?: string | null;
@@ -31,6 +31,7 @@ function subtitle(d: Device): string {
 export function ToList({ devices, sessions, settings, onToggle, onRescan, onAddManual, onForget, onFavorite, busyDeviceId }: Props) {
   const [host, setHost] = useState('');
   const [adding, setAdding] = useState(false);
+  const [addError, setAddError] = useState('');
   const byId = new Map(sessions.map((s) => [s.device.id, s]));
   const visible = devices.filter((d) => d.kind !== 'raop' || !devices.some((o) => o.kind === 'airplay' && o.host === d.host));
   const sorted = [...visible].sort((a, b) => {
@@ -44,20 +45,36 @@ export function ToList({ devices, sessions, settings, onToggle, onRescan, onAddM
     const value = host.trim();
     if (!value) return;
     setAdding(true);
+    setAddError('');
     try {
-      // Accept "host" or "host:port"; AirPlay is the safe default, Cast uses 8009.
-      const m = /^(.+?)(?::(\d+))?$/.exec(value)!;
-      const port = m[2] ? parseInt(m[2], 10) : undefined;
-      const kind: DeviceKind = port === 8009 ? 'cast' : 'airplay';
-      await onAddManual({ host: m[1], port, kind });
+      // Accept "host", "host:port" and "[v6::addr]:port". A bare address is sent as
+      // "auto" so the main process can ask the device which protocol it speaks rather
+      // than guessing AirPlay and producing a receiver that can never connect.
+      let hostPart = value;
+      let port: number | undefined;
+      const bracketed = /^\[(.+)\](?::(\d+))?$/.exec(value);
+      if (bracketed) {
+        hostPart = bracketed[1];
+        port = bracketed[2] ? parseInt(bracketed[2], 10) : undefined;
+      } else if ((value.match(/:/g) ?? []).length === 1) {
+        const [h, p] = value.split(':');
+        if (/^\d+$/.test(p)) {
+          hostPart = h;
+          port = parseInt(p, 10);
+        }
+      }
+      const kind: DeviceKind | 'auto' = port === undefined ? 'auto' : port === 8009 ? 'cast' : 'airplay';
+      await onAddManual({ host: hostPart, port, kind });
       setHost('');
+    } catch (err) {
+      setAddError((err as Error).message || 'could not add that receiver');
     } finally {
       setAdding(false);
     }
   };
 
   return (
-    <section className="list">
+    <section className="list to-list">
       <div className="list-head">
         <span className="list-title">To</span>
         <button className="icon-btn" title="Scan again" onClick={onRescan}>
@@ -69,9 +86,10 @@ export function ToList({ devices, sessions, settings, onToggle, onRescan, onAddM
         <span className="row-icon">⌁</span>
         <input placeholder="IP address or hostname" value={host} onChange={(e) => setHost(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && quickConnect()} />
         <button className="icon-btn" disabled={adding || !host.trim()} onClick={quickConnect} title="Add receiver">
-          →
+          {adding ? '…' : '→'}
         </button>
       </div>
+      {addError && <p className="empty-line error-line">{addError}</p>}
 
       {sorted.length === 0 && <p className="empty-line">Looking for receivers on your network…</p>}
 

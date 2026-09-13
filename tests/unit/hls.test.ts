@@ -25,7 +25,8 @@ describe('HLS segmenter', () => {
     expect(seg.segments.length).toBe(3);
     expect(seg.ready).toBe(true);
     const playlist = seg.playlist();
-    expect(playlist).toContain('#EXT-X-MAP:URI="init.mp4"');
+    // The init URI carries a version so a changed init can never reuse a fetched URI.
+    expect(playlist).toMatch(/#EXT-X-MAP:URI="init-\d+\.mp4"/);
     expect(playlist).toContain('#EXT-X-MEDIA-SEQUENCE:0');
     expect(playlist).toContain('seg-2.m4s');
     expect(playlist).toContain('#EXT-X-TARGETDURATION:1');

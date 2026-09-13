@@ -449,6 +449,10 @@ body {
   line-height: 1.5;
 }
 
+.error-line {
+  color: var(--danger);
+}
+
 .back {
   background: transparent;
   border: none;

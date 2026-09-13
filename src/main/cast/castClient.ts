@@ -100,6 +100,9 @@ export class CastClient extends EventEmitter {
     }
     this.player.on('status', (status: any) => this.onStatus(status));
     this.player.on('close', () => {
+      // Stop polling before dropping the player, otherwise the 2 s status timer keeps
+      // running forever against a session that no longer exists.
+      this.stopStatusPolling();
       this.player = null;
       this.emit('ended');
     });

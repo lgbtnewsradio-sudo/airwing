@@ -61,7 +61,7 @@ describe('local server + stream hub', () => {
     expect(res.status).toBe(200);
     expect(res.headers.get('access-control-allow-origin')).toBe('*');
     const playlist = await res.text();
-    expect(playlist).toContain('#EXT-X-MAP:URI="init.mp4"');
+    expect(playlist).toMatch(/#EXT-X-MAP:URI="init-\d+\.mp4"/);
     const seg = /seg-(\d+)\.m4s/.exec(playlist)![1];
     const segRes = await fetch(`${base}/hls/seg-${seg}.m4s`);
     expect(segRes.status).toBe(200);
@@ -69,6 +69,13 @@ describe('local server + stream hub', () => {
     const init = await fetch(base + '/hls/init.mp4');
     expect(init.status).toBe(200);
     expect(Buffer.from(await init.arrayBuffer()).subarray(4, 8).toString()).toBe('ftyp');
+    // The versioned URI the playlist actually points at must serve the same init.
+    const versioned = /#EXT-X-MAP:URI="(init-\d+\.mp4)"/.exec(playlist)![1];
+    const versionedRes = await fetch(`${base}/hls/${versioned}`);
+    expect(versionedRes.status).toBe(200);
+    expect(Buffer.from(await versionedRes.arrayBuffer()).subarray(4, 8).toString()).toBe('ftyp');
+    // An init version that was never published is a clean 404, not a wrong-bytes answer.
+    expect((await fetch(`${base}/hls/init-9999.mp4`)).status).toBe(404);
     const info: any = await (await fetch(base + '/api/info')).json();
     expect(info.streaming).toBe(true);
     expect(info.codecs).toBe('avc1.640028,mp4a.40.2');
