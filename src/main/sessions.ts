@@ -12,6 +12,7 @@ import type { StreamHub } from './streamHub';
 import type { LocalServer, RegisteredMedia } from './server';
 import type { CredentialStore } from './settings';
 import { deviceKey } from './discovery';
+import { unsupportedReason } from '@shared/support';
 import { addressReaching } from './net';
 import { log } from './logger';
 
@@ -93,6 +94,10 @@ export class SessionManager extends EventEmitter {
     this.sessions.set(device.id, session);
     this.emit('change', this.list());
     try {
+      // Refuse up front rather than after a 12 s spinner on the TV: we know from the
+      // model string that this receiver will never load a third-party stream.
+      const unsupported = unsupportedReason(device);
+      if (unsupported) throw new Error(unsupported);
       const host = addressReaching(device.host);
       let url: string;
       let mime = 'application/vnd.apple.mpegurl';

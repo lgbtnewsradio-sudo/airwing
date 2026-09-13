@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { AppSettings, Device, DeviceKind, SessionInfo } from '@shared/types';
+import { unsupportedLabel } from '@shared/support';
 
 interface Props {
   devices: Device[];
@@ -112,7 +113,7 @@ export function ToList({ devices, sessions, settings, onToggle, onRescan, onAddM
                   {state === 'pairing' && 'Waiting for the code on screen'}
                   {live && (state === 'paused' ? 'Paused' : d.kind === 'web' ? 'Streaming' : 'Streaming · a few seconds behind')}
                   {state === 'error' && (s?.error ?? 'Failed')}
-                  {!state && subtitle(d)}
+                  {!state && (unsupportedLabel(d) ?? subtitle(d))}
                 </span>
               </span>
               <span className={`dot ${live ? 'on' : state === 'connecting' || state === 'pairing' ? 'pending' : state === 'error' ? 'bad' : ''}`} />
