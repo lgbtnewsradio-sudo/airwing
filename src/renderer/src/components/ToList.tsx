@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { AppSettings, Device, DeviceKind, SessionInfo } from '@shared/types';
-import { unsupportedLabel } from '@shared/support';
+import { unsupportedLabel, needsFairPlay } from '@shared/support';
 
 interface Props {
   devices: Device[];
@@ -24,6 +24,7 @@ function icon(d: Device): string {
 function subtitle(d: Device): string {
   const proto = d.kind === 'cast' ? 'Google Cast' : d.caps.airplayVersion === 2 ? 'AirPlay 2' : 'AirPlay';
   const bits = [proto];
+  if (needsFairPlay(d)) bits.push('screen mirroring');
   if (!d.caps.video) bits.push('audio only');
   if (d.manual) bits.push('manual');
   return bits.join(' · ');

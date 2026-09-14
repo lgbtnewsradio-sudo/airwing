@@ -21,10 +21,10 @@ import { randomBytes, hkdfSync, createHash } from 'node:crypto';
 import bplistCreator from 'bplist-creator';
 import { parseBuffer as parseBplist } from 'bplist-parser';
 import type { AirPlayConnection, AirPlayResponse } from './connection';
-import type { SessionKeys } from './hap';
+import { deriveKeys, EVENTS_SALT, EVENTS_READ, EVENTS_WRITE, type SessionKeys } from './hap';
 import { newFPSAPSession, byteSource } from './fairplay';
 import { aeadEncrypt } from './chacha20poly1305';
-import { randomId } from './crypto';
+import { HapFramer, randomId } from './crypto';
 import { log } from '../logger';
 
 const BPLIST = 'application/x-apple-binary-plist';
@@ -287,6 +287,7 @@ export class MirrorClient extends EventEmitter {
   private readonly conn: AirPlayConnection;
   private readonly keys: SessionKeys;
   private dataConn: net.Socket | null = null;
+  private eventConn: net.Socket | null = null;
   private cseq = 0;
   private readonly sessionUUID = randomId().toUpperCase();
   private readonly deviceID = macFromRandom();
@@ -333,10 +334,16 @@ export class MirrorClient extends EventEmitter {
     const ctrl = await this.rtsp('SETUP', this.audioURI, toPlist(this.controlPlist()));
     if (ctrl.code !== 200) throw new Error(`control SETUP failed: ${ctrl.code} ${ctrl.message}`);
     const ctrlResp = fromPlist(ctrl.body);
+    log.info(this.scope, `control SETUP -> ${ctrl.code}; resp keys: [${ctrlResp ? Object.keys(ctrlResp).join(', ') : 'none'}]; eventPort=${ctrlResp?.eventPort ?? '-'} skipRecord=${ctrlResp?.skipRecord ?? '-'}`);
     if (!this.clock.configureFromSetup(ctrlResp, ctrl.headers, t0)) {
       throw new Error('control SETUP did not return a PTP timeline (timingPeerInfo.ClockID)');
     }
     log.info(this.scope, `control SETUP ok; PTP timeline 0x${this.clock.timelineID.toString(16)}`);
+
+    // 1b) Connect the reverse event channel the receiver advertised. The modern Apple TV
+    //     will not answer RECORD until this is up, so it must happen before RECORD.
+    const eventPort = plistInt(ctrlResp?.eventPort);
+    if (eventPort > 0) await this.connectEvent(eventPort);
 
     // 2) RECORD starts the session (session-first receivers).
     if (!ctrlResp?.skipRecord) {
@@ -459,6 +466,68 @@ export class MirrorClient extends EventEmitter {
     };
     if (body) headers['Content-Type'] = contentType ?? BPLIST;
     return this.conn.request(method, uri, { protocol: 'RTSP/1.0', headers, body, allowError: true, timeoutMs: 10000 });
+  }
+
+  /**
+   * Connect the receiver's reverse event channel (encrypted with Events-* keys derived from
+   * the pair-verify secret) and answer each request it sends with 200 OK, so the session
+   * stays alive. Modern Apple TVs gate RECORD on this channel existing.
+   */
+  private connectEvent(port: number): Promise<void> {
+    const keys = deriveKeys(this.keys.shared, EVENTS_SALT, EVENTS_READ, EVENTS_WRITE);
+    const framer = new HapFramer(keys.outKey, keys.inKey);
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = () => {
+        if (!settled) {
+          settled = true;
+          resolve();
+        }
+      };
+      const sock = net.createConnection({ host: this.opts.host, port }, () => {
+        this.eventConn = sock;
+        log.info(this.scope, `event channel connected to ${this.opts.host}:${port}`);
+        done();
+      });
+      let rx = Buffer.alloc(0);
+      sock.on('data', (data) => {
+        try {
+          const plain = framer.decrypt(data);
+          if (!plain.length) return;
+          rx = Buffer.concat([rx, plain]);
+          for (;;) {
+            const headEnd = rx.indexOf('\r\n\r\n');
+            if (headEnd < 0) break;
+            const headText = rx.subarray(0, headEnd).toString('utf8');
+            const contentLength = parseInt(/content-length:\s*(\d+)/i.exec(headText)?.[1] ?? '0', 10) || 0;
+            const total = headEnd + 4 + contentLength;
+            if (rx.length < total) break;
+            rx = rx.subarray(total);
+            const m = /^(\w+) \S+ (HTTP|RTSP)\/([0-9.]+)/.exec(headText);
+            if (m) {
+              const cseq = /CSeq:\s*(\d+)/i.exec(headText)?.[1];
+              const reply = `${m[2]}/${m[3]} 200 OK\r\n${cseq ? `CSeq: ${cseq}\r\n` : ''}Audio-Latency: 0\r\nContent-Length: 0\r\n\r\n`;
+              sock.write(framer.encrypt(Buffer.from(reply)));
+            }
+          }
+        } catch (err) {
+          log.debug(this.scope, `event channel decrypt error: ${(err as Error).message}`);
+        }
+      });
+      sock.on('error', (err) => {
+        log.warn(this.scope, `event channel error: ${err.message}`);
+        done();
+      });
+      sock.on('close', () => {
+        if (this.eventConn === sock) this.eventConn = null;
+      });
+      sock.setTimeout(6000, () => {
+        if (!this.eventConn) {
+          log.warn(this.scope, 'event channel connect timed out (continuing)');
+          done();
+        }
+      });
+    });
   }
 
   private connectData(port: number): Promise<void> {
@@ -622,6 +691,8 @@ export class MirrorClient extends EventEmitter {
     this.heartbeatTimer = null;
     this.dataConn?.destroy();
     this.dataConn = null;
+    this.eventConn?.destroy();
+    this.eventConn = null;
   }
 }
 

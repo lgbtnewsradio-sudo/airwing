@@ -13,7 +13,7 @@ import type { StreamHub } from './streamHub';
 import type { LocalServer, RegisteredMedia } from './server';
 import type { CredentialStore } from './settings';
 import { deviceKey } from './discovery';
-import { unsupportedReason, appleTvGeneration } from '@shared/support';
+import { unsupportedReason, needsFairPlay } from '@shared/support';
 import { addressReaching } from './net';
 import { log } from './logger';
 
@@ -29,20 +29,6 @@ interface Session {
   stopping?: boolean;
 }
 
-/**
- * The AirPlay screen-mirroring path (FairPlay) is reverse-engineered and, unlike the crypto,
- * unverified against Apple hardware yet, so it is opt-in. Set AIRWING_MIRROR=1 to route
- * modern Apple TVs through it instead of the instant "not supported" explanation.
- */
-function mirroringEnabled(): boolean {
-  return process.env.AIRWING_MIRROR === '1' || process.env.AIRWING_MIRROR === 'true';
-}
-
-function needsFairPlayMirror(device: Device): boolean {
-  if (device.kind !== 'airplay' && device.kind !== 'raop') return false;
-  const gen = appleTvGeneration(device.model);
-  return gen !== null && gen >= 5;
-}
 
 export interface SessionManagerOptions {
   hub: StreamHub;
@@ -116,8 +102,7 @@ export class SessionManager extends EventEmitter {
       // Modern Apple TVs (FairPlay-gated) can be driven through the real-time mirroring
       // transport when it is enabled; otherwise refuse up front rather than after a 12 s
       // spinner on the TV, since the /play path will never load for them.
-      if (target.type === 'live' && needsFairPlayMirror(device)) {
-        if (!mirroringEnabled()) throw new Error(unsupportedReason(device) ?? 'unsupported receiver');
+      if (target.type === 'live' && needsFairPlay(device)) {
         session.info.transport = 'airplay2-mirror';
         if (!(await this.opts.hub.waitForActive())) throw new Error('the capture did not start; check the Logs tab');
         await this.connectMirror(session);

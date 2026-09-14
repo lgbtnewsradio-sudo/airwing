@@ -1,9 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { appleTvGeneration, unsupportedReason, unsupportedLabel } from '../../src/shared/support';
+import { appleTvGeneration, unsupportedReason, unsupportedLabel, needsFairPlay } from '../../src/shared/support';
 
 /**
- * The rule that stops AirWing spinning for 12 seconds against an Apple TV that will never
- * play third-party video. It must catch tvOS devices without catching anything that works.
+ * Receiver support rules. Modern Apple TVs are no longer refused — they are driven through
+ * the FairPlay screen-mirroring transport — so nothing here is "unsupported"; instead the
+ * rule identifies which receivers need that mirroring path.
  */
 describe('receiver support rules', () => {
   it('reads the Apple TV generation from the model string', () => {
@@ -14,25 +15,26 @@ describe('receiver support rules', () => {
     expect(appleTvGeneration(undefined)).toBeNull();
   });
 
-  it('refuses tvOS Apple TVs, which require FairPlay', () => {
+  it('flags tvOS Apple TVs as needing the FairPlay mirroring transport', () => {
     for (const model of ['AppleTV5,3', 'AppleTV6,2', 'AppleTV11,1', 'AppleTV14,1']) {
-      expect(unsupportedReason({ kind: 'airplay', model })).toMatch(/FairPlay/);
-      expect(unsupportedLabel({ kind: 'airplay', model })).toMatch(/FairPlay/);
+      expect(needsFairPlay({ kind: 'airplay', model })).toBe(true);
     }
   });
 
-  it('still allows everything that actually works', () => {
-    // Apple TV 3 speaks AirPlay 1 and does play third-party video.
-    expect(unsupportedReason({ kind: 'airplay', model: 'AppleTV3,2' })).toBeNull();
-    // HomePod and other AirPlay speakers are fine.
-    expect(unsupportedReason({ kind: 'airplay', model: 'AudioAccessory5,1' })).toBeNull();
-    // Roku, Fire TV and other AirPlay 2 TVs are fine.
-    expect(unsupportedReason({ kind: 'airplay', model: 'C158X' })).toBeNull();
-    expect(unsupportedReason({ kind: 'airplay', model: 'AFTHA004' })).toBeNull();
-    // Chromecast is a different protocol entirely.
-    expect(unsupportedReason({ kind: 'cast', model: 'Chromecast Ultra' })).toBeNull();
-    // A receiver that never reported a model must not be blocked.
-    expect(unsupportedReason({ kind: 'airplay', model: undefined })).toBeNull();
-    expect(unsupportedLabel({ kind: 'cast', model: 'Chromecast' })).toBeNull();
+  it('does not require FairPlay for anything that speaks the ordinary paths', () => {
+    expect(needsFairPlay({ kind: 'airplay', model: 'AppleTV3,2' })).toBe(false); // AirPlay 1
+    expect(needsFairPlay({ kind: 'airplay', model: 'AudioAccessory5,1' })).toBe(false); // HomePod
+    expect(needsFairPlay({ kind: 'airplay', model: 'C158X' })).toBe(false); // Roku
+    expect(needsFairPlay({ kind: 'airplay', model: 'AFTHA004' })).toBe(false); // Fire TV
+    expect(needsFairPlay({ kind: 'cast', model: 'Chromecast Ultra' })).toBe(false);
+    expect(needsFairPlay({ kind: 'airplay', model: undefined })).toBe(false);
+  });
+
+  it('no longer marks any receiver unsupported', () => {
+    for (const model of ['AppleTV5,3', 'AppleTV14,1', 'AppleTV3,2', 'C158X', undefined]) {
+      expect(unsupportedReason({ kind: 'airplay', model })).toBeNull();
+      expect(unsupportedLabel({ kind: 'airplay', model })).toBeNull();
+    }
+    expect(unsupportedReason({ kind: 'cast', model: 'Chromecast' })).toBeNull();
   });
 });

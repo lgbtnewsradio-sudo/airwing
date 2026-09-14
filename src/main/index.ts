@@ -15,7 +15,7 @@ import {
   type MenuItemConstructorOptions,
 } from 'electron';
 import { join } from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import {
   IPC,
@@ -701,7 +701,35 @@ app.whenReady().then(async () => {
   createTray();
   registerHotkeys();
   if (process.argv.includes('--hidden')) mainWindow.hide();
+  maybeAutoConnect();
 });
+
+/**
+ * Test/automation hook: AIRWING_AUTOCONNECT=<host> connects to that receiver (live) once it
+ * is discovered and capture is running. AIRWING_SEED_CREDS=<file> pre-seeds pairing keys so
+ * no on-screen PIN is needed. Used to drive the AirPlay mirroring path end-to-end.
+ */
+function maybeAutoConnect(): void {
+  const host = process.env.AIRWING_AUTOCONNECT;
+  if (!host) return;
+  const seedFile = process.env.AIRWING_SEED_CREDS;
+  const seed = seedFile ? (() => { try { return readFileSync(seedFile, 'utf8').trim(); } catch { return ''; } })() : '';
+  const started = Date.now();
+  const timer = setInterval(async () => {
+    if (Date.now() - started > 90000) { clearInterval(timer); log.warn('autoconnect', `gave up waiting for ${host}`); return; }
+    const dev = discovery.list().find((d) => d.host === host);
+    if (!dev) return;
+    clearInterval(timer);
+    try {
+      if (seed) { credentials.set(deviceKey(dev.kind, dev.txt, dev.host), seed); log.info('autoconnect', 'seeded stored pairing credentials'); }
+      log.info('autoconnect', `connecting to ${dev.name} @ ${dev.host} (${dev.model})`);
+      await sessions.connect(dev, { type: 'live' });
+      log.info('autoconnect', 'connect() returned');
+    } catch (err) {
+      log.error('autoconnect', err as Error);
+    }
+  }, 1000);
+}
 
 app.on('window-all-closed', () => {
   // Keep running in the tray.
