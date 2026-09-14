@@ -473,6 +473,11 @@ function registerIpc(): void {
     const buf = Buffer.isBuffer(data) ? data : Buffer.from(data instanceof Uint8Array ? data.buffer : data, data instanceof Uint8Array ? data.byteOffset : 0, data.byteLength);
     hub.push(buf, info);
   });
+  ipcMain.on(IPC.mirrorFrame, (_e, au: ArrayBuffer | Uint8Array, keyframe: boolean, config?: ArrayBuffer | Uint8Array) => {
+    const auBuf = au instanceof Uint8Array ? au : new Uint8Array(au);
+    const cfgBuf = config ? (config instanceof Uint8Array ? config : new Uint8Array(config)) : undefined;
+    sessions.pushMirrorFrame(auBuf, keyframe, cfgBuf);
+  });
   ipcMain.on(IPC.streamState, (_e, state: { active: boolean; paused: boolean; dropped?: number; error?: string; reason?: string }) => {
     if (state.error) log.error('capture', state.error);
     else if (state.reason && !state.active) log.info('capture', `capture stopped: ${state.reason}`);
@@ -675,6 +680,11 @@ app.whenReady().then(async () => {
   sessions.on('pairing-required', (prompt) => {
     showWindow();
     send(IPC.pairingPrompt, prompt);
+  });
+  // AirPlay screen mirroring: turn the renderer's raw-H.264 tap on/off with mirror sessions.
+  sessions.on('mirror-tap', (active: boolean) => {
+    send(IPC.mirrorTap, active);
+    if (active && hub.active) sendCaptureCommand({ type: 'keyframe' });
   });
   hub.on('stats', () => send(IPC.streamStats, hub.stats(sessions.count)));
   hub.on('meta', () => send(IPC.streamStats, hub.stats(sessions.count)));

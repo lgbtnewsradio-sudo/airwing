@@ -7,12 +7,13 @@
 import { EventEmitter } from 'node:events';
 import type { Device, MediaControlAction, SessionInfo, SessionState } from '@shared/types';
 import { AirPlayClient, PairingRequiredError } from './airplay/client';
+import { MirrorClient } from './airplay/mirror';
 import { CastClient } from './cast/castClient';
 import type { StreamHub } from './streamHub';
 import type { LocalServer, RegisteredMedia } from './server';
 import type { CredentialStore } from './settings';
 import { deviceKey } from './discovery';
-import { unsupportedReason } from '@shared/support';
+import { unsupportedReason, appleTvGeneration } from '@shared/support';
 import { addressReaching } from './net';
 import { log } from './logger';
 
@@ -22,9 +23,25 @@ interface Session {
   info: SessionInfo;
   target: SessionTarget;
   airplay?: AirPlayClient;
+  mirror?: MirrorClient;
   cast?: CastClient;
   media?: RegisteredMedia;
   stopping?: boolean;
+}
+
+/**
+ * The AirPlay screen-mirroring path (FairPlay) is reverse-engineered and, unlike the crypto,
+ * unverified against Apple hardware yet, so it is opt-in. Set AIRWING_MIRROR=1 to route
+ * modern Apple TVs through it instead of the instant "not supported" explanation.
+ */
+function mirroringEnabled(): boolean {
+  return process.env.AIRWING_MIRROR === '1' || process.env.AIRWING_MIRROR === 'true';
+}
+
+function needsFairPlayMirror(device: Device): boolean {
+  if (device.kind !== 'airplay' && device.kind !== 'raop') return false;
+  const gen = appleTvGeneration(device.model);
+  return gen !== null && gen >= 5;
 }
 
 export interface SessionManagerOptions {
@@ -37,6 +54,8 @@ export interface SessionManagerOptions {
 export class SessionManager extends EventEmitter {
   private sessions = new Map<string, Session>();
   private pairingClients = new Map<string, AirPlayClient>();
+  /** Active mirror sessions fed from the renderer's raw-H.264 tap. */
+  private mirrorClients = new Map<string, MirrorClient>();
 
   constructor(private readonly opts: SessionManagerOptions) {
     super();
@@ -94,8 +113,18 @@ export class SessionManager extends EventEmitter {
     this.sessions.set(device.id, session);
     this.emit('change', this.list());
     try {
-      // Refuse up front rather than after a 12 s spinner on the TV: we know from the
-      // model string that this receiver will never load a third-party stream.
+      // Modern Apple TVs (FairPlay-gated) can be driven through the real-time mirroring
+      // transport when it is enabled; otherwise refuse up front rather than after a 12 s
+      // spinner on the TV, since the /play path will never load for them.
+      if (target.type === 'live' && needsFairPlayMirror(device)) {
+        if (!mirroringEnabled()) throw new Error(unsupportedReason(device) ?? 'unsupported receiver');
+        session.info.transport = 'airplay2-mirror';
+        if (!(await this.opts.hub.waitForActive())) throw new Error('the capture did not start; check the Logs tab');
+        await this.connectMirror(session);
+        this.setState(session, 'streaming');
+        log.info('session', `${device.name}: mirroring via experimental FairPlay transport`);
+        return { ...session.info };
+      }
       const unsupported = unsupportedReason(device);
       if (unsupported) throw new Error(unsupported);
       const host = addressReaching(device.host);
@@ -217,6 +246,75 @@ export class SessionManager extends EventEmitter {
     await client.play(url, { position: 0 });
   }
 
+  /**
+   * Connect a modern Apple TV via the real-time screen-mirroring transport (FairPlay). Reuses
+   * AirPlayClient for connect + pair-verify (and PIN pairing when required), then hands its
+   * encrypted connection to a MirrorClient. Frames arrive from the renderer's raw-H.264 tap.
+   */
+  private async connectMirror(session: Session): Promise<void> {
+    const device = session.info.device;
+    const key = this.credentialKey(device);
+    const client = new AirPlayClient({
+      host: device.host,
+      port: device.port,
+      name: device.name,
+      txt: device.txt,
+      credentials: this.opts.credentials.get(key),
+      onCredentials: (c) => this.opts.credentials.set(key, c),
+      senderName: this.opts.senderName(),
+    });
+    session.airplay = client;
+    client.on('close', () => {
+      if (!session.stopping && this.sessions.get(device.id) === session && session.info.state === 'streaming') {
+        this.setState(session, 'error', 'connection closed by receiver');
+        this.cleanup(session);
+      }
+    });
+    await client.connect();
+    await client.authenticate(); // pair-verify + channel encryption; throws PairingRequiredError
+    const conn = client.connection;
+    const keys = client.sessionKeys;
+    if (!conn || !keys) throw new Error('pair-verify did not establish an encrypted session (is this an AirPlay 2 receiver?)');
+    const mirror = new MirrorClient({
+      host: device.host,
+      port: device.port,
+      name: device.name,
+      senderName: this.opts.senderName(),
+      conn,
+      keys,
+      info: client.info,
+    });
+    session.mirror = mirror;
+    mirror.on('error', (err: Error) => {
+      if (session.stopping) return;
+      this.unregisterMirror(device.id);
+      this.setState(session, 'error', err.message);
+      this.cleanup(session);
+    });
+    await mirror.start();
+    // Only start pulling frames once SETUP/RECORD succeeded, so the renderer tap turns on
+    // exactly when there is a live receiver to consume it.
+    this.registerMirror(device.id, mirror);
+  }
+
+  private registerMirror(id: string, m: MirrorClient): void {
+    const wasEmpty = this.mirrorClients.size === 0;
+    this.mirrorClients.set(id, m);
+    if (wasEmpty) this.emit('mirror-tap', true);
+  }
+
+  private unregisterMirror(id: string): void {
+    if (this.mirrorClients.delete(id) && this.mirrorClients.size === 0) this.emit('mirror-tap', false);
+  }
+
+  /** Fan a raw H.264 access unit (from the renderer tap) out to every active mirror session. */
+  pushMirrorFrame(au: Uint8Array, keyframe: boolean, config?: Uint8Array): void {
+    for (const m of this.mirrorClients.values()) {
+      if (config) m.setCodecConfig(config);
+      m.sendAccessUnit(au, keyframe);
+    }
+  }
+
   /** Begin PIN pairing with an AirPlay receiver (shows a code on its screen). */
   async startPairing(device: Device): Promise<void> {
     const key = this.credentialKey(device);
@@ -318,6 +416,10 @@ export class SessionManager extends EventEmitter {
 
   private async cleanupAsync(session: Session): Promise<void> {
     try {
+      if (session.mirror) {
+        this.unregisterMirror(session.info.device.id);
+        await session.mirror.stop();
+      }
       if (session.cast) await session.cast.stop();
       if (session.airplay) await session.airplay.stop();
     } catch (err) {
@@ -325,6 +427,7 @@ export class SessionManager extends EventEmitter {
     }
     session.cast = undefined;
     session.airplay = undefined;
+    session.mirror = undefined;
   }
 
   /** Called when a live session's receiver dropped; retry when the stream restarts. */

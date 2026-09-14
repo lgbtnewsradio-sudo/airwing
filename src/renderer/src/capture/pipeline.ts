@@ -98,6 +98,10 @@ export class CapturePipeline {
   private statsTimer: number | null = null;
   /** True when cropping or scaling means frames must go through the canvas. */
   private canvasRequired = false;
+  /** AirPlay screen-mirroring tap: emit raw avcC access units for the mirror transport. */
+  private mirrorTap = false;
+  private mirrorConfigSent = false;
+  onRawVideo: ((au: Uint8Array, keyframe: boolean, config?: Uint8Array) => void) | null = null;
   /**
    * Serialises start/stop. Both are async and were independently reachable (the stop and
    * start IPC commands arrive on separate callbacks), so an in-flight teardown could run
@@ -522,7 +526,15 @@ export class CapturePipeline {
     chunk.copyTo(data);
     this.encoded++;
     const dur = chunk.duration && chunk.duration > 0 ? chunk.duration : this.frameIntervalUs;
-    const sample = { data, ts: chunk.timestamp, key: chunk.type === 'key', dur };
+    const key = chunk.type === 'key';
+    // AirPlay screen-mirroring tap: WebCodecs 'avc' output is already avcC (length-prefixed
+    // NALUs), exactly what the mirror transport sends. The avcC config rides the first frame.
+    if (this.mirrorTap && this.onRawVideo) {
+      const config = !this.mirrorConfigSent && this.videoDesc ? this.videoDesc : undefined;
+      if (config) this.mirrorConfigSent = true;
+      this.onRawVideo(data, key, config);
+    }
+    const sample = { data, ts: chunk.timestamp, key, dur };
     if (!this.muxer) {
       this.pendingVideo.push(sample);
       if (this.pendingVideo.length > 120) this.pendingVideo.shift();
@@ -600,6 +612,16 @@ export class CapturePipeline {
 
   requestKeyframe(): void {
     this.keyframeRequested = true;
+  }
+
+  /** Turn the raw-H.264 mirror tap on or off. Enabling forces a fresh keyframe + config. */
+  setMirrorTap(active: boolean): void {
+    if (this.mirrorTap === active) return;
+    this.mirrorTap = active;
+    if (active) {
+      this.mirrorConfigSent = false;
+      this.keyframeRequested = true; // the receiver needs an IDR + avcC to start decoding
+    }
   }
 
   setPaused(paused: boolean): void {

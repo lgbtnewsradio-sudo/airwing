@@ -41,20 +41,26 @@ export function App() {
   const [busyDevice, setBusyDevice] = useState<string | null>(null);
   const [captureState, setCaptureState] = useState<{ active: boolean; paused: boolean }>({ active: false, paused: false });
   const [volume, setVolume] = useState(1);
+  const [version, setVersion] = useState('');
   const configRef = useRef(config);
   configRef.current = config;
 
   const pipeline = useMemo(
     () =>
-      new CapturePipeline(
-        (data, info) => api.capture.sendData(data, info),
-        (meta) => api.capture.sendMeta(meta),
-        (state) => {
-          setCaptureState({ active: state.active, paused: state.paused });
-          if (state.error) setError(state.error);
-          api.capture.sendState({ ...state, dropped: pipeline.stats.dropped });
-        },
-      ),
+      (() => {
+        const p = new CapturePipeline(
+          (data, info) => api.capture.sendData(data, info),
+          (meta) => api.capture.sendMeta(meta),
+          (state) => {
+            setCaptureState({ active: state.active, paused: state.paused });
+            if (state.error) setError(state.error);
+            api.capture.sendState({ ...state, dropped: p.stats.dropped });
+          },
+        );
+        // AirPlay screen-mirroring tap: forward raw avcC access units to the mirror transport.
+        p.onRawVideo = (au, keyframe, cfg) => api.capture.sendMirrorFrame(au, keyframe, cfg);
+        return p;
+      })(),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
   );
@@ -70,8 +76,9 @@ export function App() {
   useEffect(() => {
     let alive = true;
     (async () => {
-      const [d, s, sess, st, r, l] = await Promise.all([api.devices.list(), api.settings.get(), api.sessions.list(), api.capture.stats(), api.receiver.info(), api.app.logs()]);
+      const [d, s, sess, st, r, l, v] = await Promise.all([api.devices.list(), api.settings.get(), api.sessions.list(), api.capture.stats(), api.receiver.info(), api.app.logs(), api.app.version()]);
       if (!alive) return;
+      setVersion(v);
       setDevices(d);
       setSettings(s);
       setConfig({ ...DEFAULT_STREAM_CONFIG, ...s.stream });
@@ -88,6 +95,7 @@ export function App() {
       api.settings.onChange(setSettings),
       api.pairing.onPrompt(setPairing),
       api.app.onLog((ev) => setLogs((prev) => [...prev.slice(-499), ev])),
+      api.capture.onMirrorTap((active) => pipeline.setMirrorTap(active)),
       api.capture.onCommand(async (cmd) => {
         try {
           if (cmd.type === 'start') {
@@ -234,6 +242,7 @@ export function App() {
       <header className="titlebar">
         <span className="logo">✈</span>
         <span className="app-name">AirWing</span>
+        {version && <span className="app-version">v{version}</span>}
         <div className="window-controls">
           <button title="Minimise to tray" onClick={() => api.app.minimize()}>
             ─

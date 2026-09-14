@@ -193,6 +193,8 @@ export const IPC = {
   capturePause: 'capture:pause',
   captureStatus: 'capture:status',
   captureCommand: 'capture:command',
+  mirrorFrame: 'mirror:frame',
+  mirrorTap: 'mirror:tap',
   sessionConnect: 'session:connect',
   sessionDisconnect: 'session:disconnect',
   sessionsList: 'session:list',

@@ -53,6 +53,10 @@ const api = {
     sendMeta: (meta: StreamMeta) => ipcRenderer.send(IPC.streamMeta, meta),
     sendData: (data: Uint8Array, info: FragmentInfo) => ipcRenderer.send(IPC.streamData, data, info),
     sendState: (state: { active: boolean; paused: boolean; dropped?: number; error?: string; reason?: string }) => ipcRenderer.send(IPC.streamState, state),
+    // Raw H.264 tap for AirPlay screen mirroring (Apple TV): main asks the renderer to emit
+    // access units, the renderer streams them straight to the mirror transport.
+    onMirrorTap: (cb: (active: boolean) => void) => on<boolean>(IPC.mirrorTap, cb),
+    sendMirrorFrame: (au: Uint8Array, keyframe: boolean, config?: Uint8Array) => ipcRenderer.send(IPC.mirrorFrame, au, keyframe, config),
     stats: (): Promise<StreamStats> => ipcRenderer.invoke(IPC.streamStats),
     onStats: (cb: (stats: StreamStats) => void) => on<StreamStats>(IPC.streamStats, cb),
   },

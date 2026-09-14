@@ -118,6 +118,16 @@ export class AirPlayClient extends EventEmitter {
     return !!this.opts.credentials;
   }
 
+  /** The (encrypted, once authenticated) control connection, for the mirroring transport. */
+  get connection(): AirPlayConnection | null {
+    return this.conn;
+  }
+
+  /** Pair-verify session keys (incl. the X25519 `shared` secret) for the mirroring transport. */
+  get sessionKeys(): SessionKeys | null {
+    return this.keys;
+  }
+
   private get scope(): string {
     return `airplay:${this.opts.name}`;
   }
