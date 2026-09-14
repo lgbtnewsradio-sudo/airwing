@@ -105,6 +105,12 @@ export class SessionManager extends EventEmitter {
       if (target.type === 'live' && needsFairPlay(device)) {
         session.info.transport = 'airplay2-mirror';
         if (!(await this.opts.hub.waitForActive())) throw new Error('the capture did not start; check the Logs tab');
+        // The mirror pushes video the instant its data channel opens; wait for the encoder to
+        // actually be producing video first, or the receiver closes the idle channel (~30s)
+        // and we only recover on a reconnect. Audio-only sources skip this.
+        if (this.opts.hub.meta?.audioOnly === false || !this.opts.hub.meta) {
+          await this.opts.hub.waitForVideo();
+        }
         await this.connectMirror(session);
         this.setState(session, 'streaming');
         log.info('session', `${device.name}: mirroring via experimental FairPlay transport`);

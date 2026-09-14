@@ -23,6 +23,8 @@ export class StreamHub extends EventEmitter {
   segmenter = new HlsSegmenter({ targetDurationSec: 1, windowSize: 10 });
   active = false;
   paused = false;
+  /** True once at least one encoded video fragment has been pushed this stream. */
+  hasVideo = false;
   startedAt = 0;
   private frameCount = 0;
   private byteCount = 0;
@@ -55,6 +57,7 @@ export class StreamHub extends EventEmitter {
     this.gop = [];
     this.active = true;
     this.paused = false;
+    this.hasVideo = false;
     this.startedAt = Date.now();
     this.encodedFrames = 0;
     this.droppedFrames = 0;
@@ -74,6 +77,7 @@ export class StreamHub extends EventEmitter {
     if (info.kind === 'video') {
       this.encodedFrames++;
       this.frameCount++;
+      this.hasVideo = true;
       if (info.keyframe) this.gop = [];
     }
     this.byteCount += data.length;
@@ -154,6 +158,27 @@ export class StreamHub extends EventEmitter {
         } else if (Date.now() - started > timeoutMs) {
           clearInterval(timer);
           resolve(false);
+        }
+      }, 100);
+    });
+  }
+
+  /**
+   * Wait until the encoder is actually producing video. The hub becomes active on its first
+   * fragment, which may be audio; the AirPlay mirror must not open its data channel before
+   * video frames exist or the receiver closes the idle channel after ~30 s.
+   */
+  waitForVideo(timeoutMs = 15000): Promise<boolean> {
+    if (this.hasVideo) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      const started = Date.now();
+      const timer = setInterval(() => {
+        if (this.hasVideo) {
+          clearInterval(timer);
+          resolve(true);
+        } else if (!this.active || Date.now() - started > timeoutMs) {
+          clearInterval(timer);
+          resolve(this.hasVideo);
         }
       }, 100);
     });
