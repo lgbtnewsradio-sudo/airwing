@@ -37,17 +37,25 @@ export class StreamHub extends EventEmitter {
 
   setMeta(meta: StreamMeta): void {
     this.meta = meta;
-    // HLS tuning, measured against a Chromecast (Sony Bravia). A receiver pinned to the
-    // live edge rebuffers forever, and a deep window lets it start far back, so both the
-    // window and the start cushion are kept small: this combination played for 98 s with
-    // no rebuffering at roughly 8 s behind live. A 4-segment window rebuffered 22 times,
-    // and no cushion at all was worse still (the receiver picks its own drifting start).
+    // HLS tuning, measured against Chromecast receivers. A receiver pinned to the live edge
+    // rebuffers forever, and a deep window lets it start far back, so the window is kept
+    // small: an 8-segment window played for 98 s with no rebuffering on a Sony Bravia, while
+    // a 4-segment window rebuffered 22 times and no cushion at all was worse still (the
+    // receiver picks its own drifting start).
+    //
+    // The cushion is what stops the rebuffer loop, and it has to be more than a token value.
+    // A 1 s cushion was enough for the Bravia only because that receiver chose to start
+    // further back on its own. A Hisense projector obeyed TIME-OFFSET=-1 literally: it began
+    // ~1 s from live, never fetched ahead (one segment per ~1.03 s, forever), held exactly
+    // 1x playback with no reserve, and flipped PLAYING/BUFFERING every ~5 s — the spinner and
+    // progress bar users see. Every segment was served 200 in 0-1 ms, so it was pure lack of
+    // headroom. 4 s gives the receiver real runway while leaving half the window behind it.
     // Browser viewers are fed per frame over WebSocket and are unaffected by any of this.
     this.segmenter = new HlsSegmenter({
       targetDurationSec: Number(process.env.AIRWING_HLS_SEG ?? 1),
       windowSize: Number(process.env.AIRWING_HLS_WINDOW ?? 8),
       audioOnly: meta.audioOnly,
-      startOffsetSec: Number(process.env.AIRWING_HLS_CUSHION ?? 1),
+      startOffsetSec: Number(process.env.AIRWING_HLS_CUSHION ?? 4),
       // Carry the counters across a restart. A receiver still polling the playlist must
       // never see the media sequence jump backwards, or it silently reuses the segment it
       // already has and sits on a frozen frame.
