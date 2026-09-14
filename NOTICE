@@ -1,0 +1,21 @@
+AirWing
+Copyright (C) 2026 AirWing contributors
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License version 3, as published by the Free
+Software Foundation. See the LICENSE file.
+
+AirWing was relicensed from MIT to GPL-3.0 to incorporate an AirPlay
+screen-mirroring implementation, including the FairPlay SAP authentication
+handshake required by Apple TV. That component is a clean-room TypeScript
+reimplementation whose FairPlay white-box constants and algorithm are derived
+from prior reverse-engineering published under the GPL:
+
+  - doubletake (https://github.com/omarroth/doubletake), GPL-3.0, an AirPlay
+    mirroring sender for Linux.
+  - UxPlay (https://github.com/FDH2/UxPlay), GPL-3.0, and the playfair lineage
+    (RPiPlay, shairport) it builds on.
+
+FairPlay is a trademark of Apple Inc. AirWing is not affiliated with, authorized
+or endorsed by Apple. The FairPlay SAP handshake is reproduced solely to allow a
+user to mirror their own screen to hardware they own (interoperability).

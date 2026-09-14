@@ -4,7 +4,7 @@
   "description": "Wireless screen mirroring, media streaming and extended desktop for Windows. Mirror to Apple TV (AirPlay), Chromecast (Google Cast), Reflector, and any web browser.",
   "main": "./out/main/index.js",
   "author": "AirWing contributors",
-  "license": "MIT",
+  "license": "GPL-3.0-or-later",
   "private": true,
   "homepage": "https://github.com/lgbtnewsradio-sudo/airwing",
   "scripts": {

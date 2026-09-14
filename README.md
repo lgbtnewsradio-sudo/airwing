@@ -28,8 +28,8 @@ It is built on Electron + TypeScript, uses WebCodecs for hardware H.264/AAC enco
 | Receiver-side playback control | ✅ | ✅ play/pause/seek/volume for files on Cast and AirPlay |
 | Global hotkeys | ✅ | ✅ configurable |
 | Encrypted connections | ✅ | ✅ HAP ChaCha20-Poly1305 (AirPlay 2), TLS (Cast) |
-| Enterprise deployment | ✅ | ✅ silent NSIS install, JSON settings, MIT licence |
-| Price | $15.99 | Free, MIT |
+| Enterprise deployment | ✅ | ✅ silent NSIS install, JSON settings |
+| Price | $15.99 | Free, GPL-3.0 |
 
 ## Download
 
@@ -119,4 +119,4 @@ tests               vitest unit/integration tests, mock receivers, Playwright e2
 
 ## Licence
 
-MIT © AirWing contributors. AirParrot is a trademark of Squirrels LLC; AirWing is an independent project and is not affiliated with Squirrels, Apple or Google.
+GPL-3.0-or-later © AirWing contributors. The project was relicensed from MIT to GPL-3.0 to incorporate an AirPlay screen-mirroring implementation (including the FairPlay SAP handshake) derived from the GPL-licensed [doubletake](https://github.com/omarroth/doubletake) and [UxPlay](https://github.com/FDH2/UxPlay); see NOTICE. AirParrot is a trademark of Squirrels LLC and FairPlay is a trademark of Apple Inc.; AirWing is an independent project, not affiliated with or endorsed by Squirrels, Apple or Google.
