@@ -127,6 +127,10 @@ export class CastClient extends EventEmitter {
     };
     this.emit('status', this.status);
     if (status.playerState === 'IDLE' && status.idleReason && status.idleReason !== 'INTERRUPTED') {
+      if (status.idleReason === 'ERROR') {
+        // Surface exactly why the receiver refused the media (codec/container/level etc.).
+        log.warn(this.scope, `receiver LOAD error status: ${JSON.stringify(status).slice(0, 600)}`);
+      }
       this.emit('idle', status.idleReason);
     }
   }
