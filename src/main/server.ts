@@ -79,6 +79,9 @@ export class LocalServer extends EventEmitter {
   port = 0;
   private viewers = new Set<WebSocket>();
   private remotes = new Set<WebSocket>();
+  /** Per-client-address count of /hls fetches, so a session can tell whether a receiver
+   *  actually reached this PC (a firewall block looks identical to a stalled receiver). */
+  private hlsFetches = new Map<string, number>();
 
   constructor(private readonly opts: ServerOptions) {
     super();
@@ -89,6 +92,20 @@ export class LocalServer extends EventEmitter {
     hub.on('end', () => this.broadcastJson({ type: 'end' }));
     hub.on('paused', (paused: boolean) => this.broadcastJson({ type: 'paused', paused }));
     hub.on('stats', () => this.broadcastRemoteState());
+  }
+
+  /** Note that `host` fetched a live-stream file from us. */
+  private recordHlsFetch(host: string): void {
+    this.hlsFetches.set(host, (this.hlsFetches.get(host) ?? 0) + 1);
+  }
+
+  /**
+   * How many times `host` has fetched the live stream. A Cast/AirPlay receiver that accepts
+   * a stream but never fetches it cannot reach this PC at all — almost always a firewall
+   * blocking inbound connections rather than a codec or receiver problem.
+   */
+  hlsFetchCount(host: string): number {
+    return this.hlsFetches.get(host) ?? 0;
   }
 
   async start(): Promise<number> {
@@ -199,6 +216,7 @@ export class LocalServer extends EventEmitter {
       res.end = ((chunk?: any, ...rest: any[]) => {
         if (chunk && typeof chunk !== 'function') bytes += Buffer.byteLength(chunk);
         const from = req.socket.remoteAddress?.replace('::ffff:', '') ?? '?';
+        if (path.startsWith('/hls/')) this.recordHlsFetch(from);
         log.debug('http', `${from} ${req.method} ${path}${url.search} -> ${res.statusCode} ${bytes}B ${Date.now() - started}ms`);
         if (res.statusCode >= 400) log.warn('http', `${from} asked for ${path} and got ${res.statusCode}`);
         return (origEnd as any)(chunk, ...rest);

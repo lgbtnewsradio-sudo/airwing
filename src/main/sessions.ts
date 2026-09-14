@@ -27,7 +27,27 @@ interface Session {
   cast?: CastClient;
   media?: RegisteredMedia;
   stopping?: boolean;
+  /** Set when the receiver accepted the stream but never fetched it from this PC. */
+  unreachable?: string;
+  reachTimer?: NodeJS.Timeout;
 }
+
+/**
+ * A receiver that accepts a stream and then never requests a single byte from us cannot
+ * reach this PC. That is almost always Windows Firewall blocking inbound connections for the
+ * network type in use, not a codec or receiver fault — so say so instead of hanging.
+ */
+function unreachableMessage(name: string, port: number): string {
+  return (
+    `${name} accepted the stream but never fetched it from this PC, so it cannot reach AirWing on port ${port}. ` +
+    'This is usually Windows Firewall blocking incoming connections: allow AirWing for Private networks ' +
+    '(Windows Security → Firewall & network protection → Allow an app through firewall → tick Private for AirWing). ' +
+    'AirPlay mirroring is unaffected because those connections go outward.'
+  );
+}
+
+/** How long to wait for a receiver to fetch the stream before calling it unreachable. */
+const REACH_TIMEOUT_MS = 12000;
 
 
 export interface SessionManagerOptions {
@@ -165,7 +185,7 @@ export class SessionManager extends EventEmitter {
     client.on('idle', (reason: string) => {
       if (session.stopping) return;
       if (reason === 'FINISHED') void this.disconnect(device.id, 'finished');
-      else if (reason === 'ERROR') this.setState(session, 'error', 'receiver reported a playback error');
+      else if (reason === 'ERROR') this.setState(session, 'error', session.unreachable ?? 'receiver reported a playback error');
       else void this.disconnect(device.id, `receiver idle (${reason})`);
     });
     client.on('close', () => {
@@ -181,6 +201,16 @@ export class SessionManager extends EventEmitter {
       if (!session.stopping) this.setState(session, 'error', err.message);
     });
     const live = session.target.type === 'live';
+    // Start the reachability watchdog before loading: load() itself can sit for ~40 s while
+    // the receiver fails to fetch the manifest, so waiting until afterwards would be too late.
+    const baseline = this.opts.server.hlsFetchCount(device.host);
+    session.reachTimer = setTimeout(() => {
+      if (session.stopping || this.sessions.get(device.id) !== session) return;
+      if (this.opts.server.hlsFetchCount(device.host) > baseline) return;
+      session.unreachable = unreachableMessage(device.name, this.opts.server.port);
+      log.warn('session', `${device.name}: no stream request after ${REACH_TIMEOUT_MS / 1000}s — receiver cannot reach this PC`);
+      this.setState(session, 'error', session.unreachable);
+    }, REACH_TIMEOUT_MS);
     await client.load({
       url,
       contentType: live ? 'application/x-mpegURL' : mime,
@@ -189,6 +219,8 @@ export class SessionManager extends EventEmitter {
       subtitle: 'AirWing',
       hlsSegmentFormat: live ? 'fmp4' : undefined,
     });
+    // Surface the diagnosis as the connect failure, so it is not overwritten by "streaming".
+    if (session.unreachable) throw new Error(session.unreachable);
   }
 
   private async connectAirPlay(session: Session, url: string): Promise<void> {
@@ -406,6 +438,10 @@ export class SessionManager extends EventEmitter {
   }
 
   private async cleanupAsync(session: Session): Promise<void> {
+    if (session.reachTimer) {
+      clearTimeout(session.reachTimer);
+      session.reachTimer = undefined;
+    }
     try {
       if (session.mirror) {
         this.unregisterMirror(session.info.device.id);

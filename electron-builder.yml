@@ -19,6 +19,8 @@ win:
   icon: build/icon.png
   artifactName: ${productName}-${version}-win-${arch}.${ext}
 nsis:
+  # Adds/removes the inbound Windows Firewall rule receivers need to fetch the stream.
+  include: build/installer.nsh
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
