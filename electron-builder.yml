@@ -22,7 +22,10 @@ nsis:
   # Adds/removes the inbound Windows Firewall rule receivers need to fetch the stream.
   include: build/installer.nsh
   oneClick: false
-  perMachine: false
+  # Installs for all users and elevates. Required for the firewall rule in installer.nsh:
+  # receivers fetch the live stream from this PC, and adding an inbound rule needs admin.
+  # A per-user (unelevated) install cannot create it, which left casting broken.
+  perMachine: true
   allowToChangeInstallationDirectory: true
   allowElevation: true
   createDesktopShortcut: true
