@@ -61,7 +61,7 @@ export class HlsSegmenter {
   readonly startOffsetSec: number;
   private readonly onSegment?: (segment: HlsSegment) => void;
   private init: Uint8Array | null = null;
-  /** Every init segment still referenced by the window, keyed by version. */
+  /** Every init segment still referenced by an available segment, keyed by version. */
   private inits = new Map<number, Uint8Array>();
   private initVersion: number;
   private pendingDiscontinuity = false;
@@ -70,7 +70,16 @@ export class HlsSegmenter {
   private pendingVideoDurationUs = 0;
   private pendingHasVideo = false;
   private nextSequence: number;
+  /** Segments advertised in the playlist window. */
   readonly segments: HlsSegment[] = [];
+  /**
+   * Segments that have scrolled out of the playlist but must stay downloadable. RFC 8216
+   * §6.2.2: a removed segment has to remain available for its own duration plus the
+   * duration of the longest playlist that contained it. Deleting it the instant it left
+   * the window made a Sony Bravia — which starts from the oldest listed segment — request
+   * a segment about a second after it vanished, get 404s, and abort playback.
+   */
+  private readonly retired: HlsSegment[] = [];
   /** Number of discontinuities that have already scrolled out of the window. */
   private discontinuitySequence: number;
   private producedSec = 0;
@@ -122,6 +131,14 @@ export class HlsSegmenter {
     return this.segments.reduce((m, s) => Math.max(m, s.durationSec), this.targetDurationSec);
   }
 
+  /**
+   * How many out-of-window segments stay downloadable. One full window plus one segment
+   * covers "segment duration + playlist duration" for steady segment lengths.
+   */
+  private get retainCount(): number {
+    return this.windowSize + 1;
+  }
+
   push(data: Uint8Array, info: FragmentInfo): void {
     if (info.kind === 'init') {
       if (this.init && this.pending.length) this.cut();
@@ -170,14 +187,17 @@ export class HlsSegmenter {
       // EXT-X-DISCONTINUITY-SEQUENCE counts the discontinuity tags that have scrolled
       // off the front of the playlist.
       if (dropped.discontinuity) this.discontinuitySequence++;
+      // No longer advertised, but still served for receivers that already have it listed.
+      this.retired.push(dropped);
     }
+    while (this.retired.length > this.retainCount) this.retired.shift();
     this.pruneInits();
     this.onSegment?.(segment);
   }
 
-  /** Drop init segments no longer referenced by anything in the window. */
+  /** Drop init segments no longer referenced by anything a receiver may still fetch. */
   private pruneInits(): void {
-    const live = new Set(this.segments.map((s) => s.initVersion));
+    const live = new Set([...this.segments, ...this.retired].map((s) => s.initVersion));
     live.add(this.initVersion);
     for (const version of [...this.inits.keys()]) {
       if (!live.has(version)) this.inits.delete(version);
@@ -189,8 +209,9 @@ export class HlsSegmenter {
     this.cut();
   }
 
+  /** A listed segment, or one that recently left the playlist and must still be served. */
   getSegment(sequence: number): HlsSegment | undefined {
-    return this.segments.find((s) => s.sequence === sequence);
+    return this.segments.find((s) => s.sequence === sequence) ?? this.retired.find((s) => s.sequence === sequence);
   }
 
   /** Number of segments available to advertise. */
@@ -234,6 +255,7 @@ export class HlsSegmenter {
     this.pendingHasVideo = false;
     this.pendingDiscontinuity = false;
     this.segments.length = 0;
+    this.retired.length = 0;
     this.producedSec = 0;
   }
 }

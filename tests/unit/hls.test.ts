@@ -50,4 +50,51 @@ describe('HLS segmenter', () => {
     expect(seg.segments.length).toBe(2);
     expect(seg.segments[0].durationSec).toBeGreaterThanOrEqual(1.9);
   });
+
+  // RFC 8216 §6.2.2: a segment removed from the playlist must stay downloadable for a while.
+  // Deleting it on eviction made a Sony Bravia, which starts from the oldest listed segment,
+  // request it ~1 s after it vanished, get 404s, and abort playback.
+  it('keeps segments that scrolled out of the playlist downloadable for one more window', () => {
+    const seg = new HlsSegmenter({ targetDurationSec: 1, windowSize: 2 });
+    seg.push(new Uint8Array(1), frag('init', true, 0, 0, 0));
+    // Keyframe every 30 frames (1 s): cuts segments 0..3, listing [2, 3].
+    for (let i = 0; i < 150; i++) seg.push(new Uint8Array(1), frag('video', i % 30 === 0, i * 33333, 33333, i + 1));
+    expect(seg.segments.map((s) => s.sequence)).toEqual([2, 3]);
+    // Evicted from the window, but a receiver that just read the old playlist can still fetch them.
+    expect(seg.getSegment(0)).toBeDefined();
+    expect(seg.getSegment(1)).toBeDefined();
+    // They are no longer advertised, and the window itself is unchanged.
+    const playlist = seg.playlist();
+    expect(playlist).toContain('#EXT-X-MEDIA-SEQUENCE:2');
+    expect(playlist).not.toContain('seg-0.m4s');
+    expect(playlist).not.toContain('seg-1.m4s');
+
+    // Five more segments (4..8): the window becomes [7, 8] and retention is windowSize + 1 = 3.
+    for (let i = 150; i < 300; i++) seg.push(new Uint8Array(1), frag('video', i % 30 === 0, i * 33333, 33333, i + 1));
+    expect(seg.segments.map((s) => s.sequence)).toEqual([7, 8]);
+    expect(seg.getSegment(3)).toBeUndefined();
+    for (const sequence of [4, 5, 6, 7, 8]) expect(seg.getSegment(sequence)).toBeDefined();
+
+    seg.reset();
+    expect(seg.getSegment(6)).toBeUndefined();
+  });
+
+  it('keeps an old init segment while retired segments still reference it', () => {
+    const seg = new HlsSegmenter({ targetDurationSec: 1, windowSize: 2 });
+    seg.push(new Uint8Array([1]), frag('init', true, 0, 0, 0)); // init v1
+    for (let i = 0; i < 150; i++) seg.push(new Uint8Array(1), frag('video', i % 30 === 0, i * 33333, 33333, i + 1));
+    // Encoder re-initialised: cuts segment 4 against v1, later segments use v2.
+    seg.push(new Uint8Array([2]), frag('init', true, 150 * 33333, 0, 0));
+    for (let i = 150; i < 240; i++) seg.push(new Uint8Array(1), frag('video', i % 30 === 0, i * 33333, 33333, i + 1));
+    // Listed segments 5 and 6 decode against v2; retired segments 2..4 still need v1.
+    expect(seg.segments.map((s) => s.initVersion)).toEqual([2, 2]);
+    expect(seg.getSegment(4)?.initVersion).toBe(1);
+    expect(seg.getInit(1)).toBeDefined();
+
+    // Once the last v1 segment is no longer retained, v1 can go.
+    for (let i = 240; i < 330; i++) seg.push(new Uint8Array(1), frag('video', i % 30 === 0, i * 33333, 33333, i + 1));
+    expect(seg.getSegment(4)).toBeUndefined();
+    expect(seg.getInit(1)).toBeUndefined();
+    expect(seg.getInit(2)).toBeDefined();
+  });
 });
