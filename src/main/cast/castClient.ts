@@ -135,6 +135,16 @@ export class CastClient extends EventEmitter {
     }
   }
 
+  /**
+   * Connect and launch (or join) the receiver app without loading media. Idempotent, and
+   * separate from load() because launching alone can take ~20 s on some TVs — callers that
+   * time the receiver's response must start their clock after this, not before.
+   */
+  async prepare(): Promise<void> {
+    await this.connect();
+    await this.launch();
+  }
+
   async load(media: CastMedia): Promise<void> {
     await this.connect();
     await this.launch();

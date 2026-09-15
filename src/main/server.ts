@@ -216,7 +216,9 @@ export class LocalServer extends EventEmitter {
       res.end = ((chunk?: any, ...rest: any[]) => {
         if (chunk && typeof chunk !== 'function') bytes += Buffer.byteLength(chunk);
         const from = req.socket.remoteAddress?.replace('::ffff:', '') ?? '?';
-        if (path.startsWith('/hls/')) this.recordHlsFetch(from);
+        // Count media-file requests too: a receiver playing a file never touches /hls/, and
+        // counting only /hls/ made every file cast look unreachable to the session watchdog.
+        this.recordHlsFetch(from);
         log.debug('http', `${from} ${req.method} ${path}${url.search} -> ${res.statusCode} ${bytes}B ${Date.now() - started}ms`);
         if (res.statusCode >= 400) log.warn('http', `${from} asked for ${path} and got ${res.statusCode}`);
         return (origEnd as any)(chunk, ...rest);

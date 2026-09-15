@@ -55,6 +55,8 @@ export interface SessionManagerOptions {
   server: LocalServer;
   credentials: CredentialStore;
   senderName: () => string;
+  /** How long after LOAD a receiver has to request the stream before it is called unreachable. */
+  reachTimeoutMs?: number;
 }
 
 export class SessionManager extends EventEmitter {
@@ -201,16 +203,21 @@ export class SessionManager extends EventEmitter {
       if (!session.stopping) this.setState(session, 'error', err.message);
     });
     const live = session.target.type === 'live';
-    // Start the reachability watchdog before loading: load() itself can sit for ~40 s while
-    // the receiver fails to fetch the manifest, so waiting until afterwards would be too late.
+    // Launch (or join) the receiver app before starting the reachability clock. On a Sony
+    // Bravia the launch alone took ~19 s; a clock started before it declared a perfectly
+    // reachable TV unreachable and tore down a session that was already fetching segments.
+    await client.prepare();
+    // Arm the watchdog as the LOAD command goes out. It runs alongside load() rather than
+    // after it, because when a receiver genuinely cannot reach us load() blocks for ~40 s.
     const baseline = this.opts.server.hlsFetchCount(device.host);
+    const reached = () => this.opts.server.hlsFetchCount(device.host) > baseline;
+    const reachTimeoutMs = this.opts.reachTimeoutMs ?? REACH_TIMEOUT_MS;
     session.reachTimer = setTimeout(() => {
-      if (session.stopping || this.sessions.get(device.id) !== session) return;
-      if (this.opts.server.hlsFetchCount(device.host) > baseline) return;
+      if (session.stopping || this.sessions.get(device.id) !== session || reached()) return;
       session.unreachable = unreachableMessage(device.name, this.opts.server.port);
-      log.warn('session', `${device.name}: no stream request after ${REACH_TIMEOUT_MS / 1000}s — receiver cannot reach this PC`);
+      log.warn('session', `${device.name}: no stream request ${reachTimeoutMs / 1000}s after LOAD — receiver cannot reach this PC`);
       this.setState(session, 'error', session.unreachable);
-    }, REACH_TIMEOUT_MS);
+    }, reachTimeoutMs);
     await client.load({
       url,
       contentType: live ? 'application/x-mpegURL' : mime,
@@ -219,8 +226,13 @@ export class SessionManager extends EventEmitter {
       subtitle: 'AirWing',
       hlsSegmentFormat: live ? 'fmp4' : undefined,
     });
-    // Surface the diagnosis as the connect failure, so it is not overwritten by "streaming".
-    if (session.unreachable) throw new Error(session.unreachable);
+    // Decide on evidence, not on a flag that may be stale: a receiver whose first request
+    // arrived after the watchdog fired is a working session, not an unreachable one.
+    if (reached()) {
+      session.unreachable = undefined;
+    } else if (session.unreachable) {
+      throw new Error(session.unreachable);
+    }
   }
 
   private async connectAirPlay(session: Session, url: string): Promise<void> {

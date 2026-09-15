@@ -5,8 +5,16 @@
  */
 
 import { readFileSync } from 'node:fs';
+import http from 'node:http';
 import { join } from 'node:path';
 import { Server } from 'castv2';
+
+export interface MockCastReceiverOptions {
+  /** Delay the LAUNCH reply, like a TV that takes seconds to bring up the receiver app. */
+  launchDelayMs?: number;
+  /** On LOAD, request the media URL from the sender, like a receiver that can reach it. */
+  fetchOnLoad?: boolean;
+}
 
 const NS = {
   connection: 'urn:x-cast:com.google.cast.tp.connection',
@@ -26,6 +34,19 @@ export class MockCastReceiver {
   private app: { appId: string; sessionId: string; transportId: string } | null = null;
   private mediaSessionId = 0;
   stopRequests = 0;
+  /** URLs this receiver fetched after LOAD (only with fetchOnLoad). */
+  readonly fetched: string[] = [];
+
+  constructor(private readonly opts: MockCastReceiverOptions = {}) {}
+
+  private fetchMedia(url: string): void {
+    http
+      .get(url, (res) => {
+        this.fetched.push(url);
+        res.resume();
+      })
+      .on('error', () => undefined);
+  }
 
   async start(): Promise<number> {
     const dir = join(__dirname);
@@ -45,10 +66,15 @@ export class MockCastReceiver {
           if (namespace === NS.receiver) reply(NS.receiver, { type: 'RECEIVER_STATUS', requestId: msg.requestId, status: this.receiverStatus() });
           else reply(NS.media, { type: 'MEDIA_STATUS', requestId: msg.requestId, status: this.mediaStatus() });
           break;
-        case 'LAUNCH':
-          this.app = { appId: msg.appId, sessionId: 'session-1', transportId: 'transport-1' };
-          reply(NS.receiver, { type: 'RECEIVER_STATUS', requestId: msg.requestId, status: this.receiverStatus() });
+        case 'LAUNCH': {
+          const launch = () => {
+            this.app = { appId: msg.appId, sessionId: 'session-1', transportId: 'transport-1' };
+            reply(NS.receiver, { type: 'RECEIVER_STATUS', requestId: msg.requestId, status: this.receiverStatus() });
+          };
+          if (this.opts.launchDelayMs) setTimeout(launch, this.opts.launchDelayMs);
+          else launch();
           break;
+        }
         case 'STOP':
           if (namespace === NS.receiver) {
             this.stopRequests++;
@@ -67,6 +93,7 @@ export class MockCastReceiver {
           reply(NS.media, { type: 'MEDIA_STATUS', requestId: msg.requestId, status: this.mediaStatus() });
           // Real receivers also broadcast the new status to every connected sender.
           reply(NS.media, { type: 'MEDIA_STATUS', requestId: 0, status: this.mediaStatus() });
+          if (this.opts.fetchOnLoad && msg.media?.contentId) this.fetchMedia(msg.media.contentId);
           break;
         case 'PAUSE':
           this.playerState = 'PAUSED';
