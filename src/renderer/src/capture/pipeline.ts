@@ -112,6 +112,9 @@ export class CapturePipeline {
   private castMirrorTap = false;
   private castMirrorKeyframeRequested = true;
   private castMirrorLastKeyframeUs = -Infinity;
+  /** Actual VP8 encode dimensions, capped independently of the primary H.264 target. */
+  private vp8Width = 0;
+  private vp8Height = 0;
   /** VP8 delta frames chain off the previous frame with no built-in recovery on loss (no
    *  retransmission is implemented for Cast Streaming yet), so a single dropped packet would
    *  otherwise freeze the picture forever. Re-keying periodically bounds that to one interval. */
@@ -674,23 +677,47 @@ export class CapturePipeline {
       this.onCastMirrorUnavailable?.();
       return;
     }
-    const cfg: VideoEncoderConfig = {
-      codec: 'vp8',
-      width: this.target.width,
-      height: this.target.height,
-      bitrate: pickBitrate(this.target.width, this.target.height, this.config?.frameRate ?? 30, this.config?.quality ?? 'balanced'),
-      framerate: this.config?.frameRate ?? 30,
-      latencyMode: 'realtime',
-      bitrateMode: 'variable',
-    };
-    try {
-      const support = await VideoEncoder.isConfigSupported(cfg);
-      if (!support.supported) throw new Error('VP8 not supported');
-    } catch {
+    // Cap independently of the primary H.264 target (which can be native/1080p+). Running a
+    // second full-resolution real-time encoder alongside the first is expensive, and this one
+    // is very likely software-only: measured 1.4 CPU cores sustained at 1920x1080 with no
+    // hardware-acceleration preference even requested, which reads as encoder backlog and
+    // shows up as several seconds of accumulating lag with no relation to anything on the
+    // network side. A real captured Chrome OFFER (see mirroring.ts) also mirrors at 1280x720,
+    // not the source's native resolution, for what is almost certainly this same reason.
+    const vp8Scale = Math.min(1, 720 / Math.min(this.target.width, this.target.height));
+    const vp8Width = even(this.target.width * vp8Scale);
+    const vp8Height = even(this.target.height * vp8Scale);
+    const frameRate = this.config?.frameRate ?? 30;
+    const bitrate = pickBitrate(vp8Width, vp8Height, frameRate, this.config?.quality ?? 'balanced');
+    let cfg: VideoEncoderConfig | null = null;
+    for (const accel of ['prefer-hardware', 'no-preference'] as const) {
+      const candidate: VideoEncoderConfig = {
+        codec: 'vp8',
+        width: vp8Width,
+        height: vp8Height,
+        bitrate,
+        framerate: frameRate,
+        latencyMode: 'realtime',
+        hardwareAcceleration: accel,
+        bitrateMode: 'variable',
+      };
+      try {
+        const support = await VideoEncoder.isConfigSupported(candidate);
+        if (support.supported) {
+          cfg = candidate;
+          break;
+        }
+      } catch {
+        /* try next */
+      }
+    }
+    if (!cfg) {
       console.warn('VP8 encoding is not available in this Chromium build; cannot use Cast Streaming');
       this.onCastMirrorUnavailable?.();
       return;
     }
+    this.vp8Width = vp8Width;
+    this.vp8Height = vp8Height;
     const encoder = new VideoEncoder({
       output: (chunk) => this.onVp8Chunk(chunk),
       error: (e) => console.warn('VP8 encoder error', e),
@@ -705,7 +732,7 @@ export class CapturePipeline {
     if (!this.onRawVideoVp8) return;
     const data = new Uint8Array(chunk.byteLength);
     chunk.copyTo(data);
-    this.onRawVideoVp8(data, chunk.type === 'key', chunk.timestamp, this.target.width, this.target.height);
+    this.onRawVideoVp8(data, chunk.type === 'key', chunk.timestamp, this.vp8Width, this.vp8Height);
   }
 
   setPaused(paused: boolean): void {
