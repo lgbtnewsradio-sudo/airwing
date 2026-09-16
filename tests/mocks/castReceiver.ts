@@ -36,6 +36,15 @@ export class MockCastReceiver {
   stopRequests = 0;
   /** URLs this receiver fetched after LOAD (only with fetchOnLoad). */
   readonly fetched: string[] = [];
+  /** currentTime values requested via SEEK, in order. */
+  readonly seeks: number[] = [];
+  private liveSeekableRangeEnd: number | null = null;
+
+  /** Simulate the receiver's live position for the next status report. */
+  setLivePosition(currentTime: number, seekableEnd: number): void {
+    this.currentTime = currentTime;
+    this.liveSeekableRangeEnd = seekableEnd;
+  }
 
   constructor(private readonly opts: MockCastReceiverOptions = {}) {}
 
@@ -104,6 +113,7 @@ export class MockCastReceiver {
           reply(NS.media, { type: 'MEDIA_STATUS', requestId: msg.requestId, status: this.mediaStatus() });
           break;
         case 'SEEK':
+          this.seeks.push(msg.currentTime);
           this.currentTime = msg.currentTime;
           reply(NS.media, { type: 'MEDIA_STATUS', requestId: msg.requestId, status: this.mediaStatus() });
           break;
@@ -141,6 +151,7 @@ export class MockCastReceiver {
         supportedMediaCommands: 15,
         volume: this.volume,
         idleReason,
+        liveSeekableRange: this.liveSeekableRangeEnd !== null ? { start: 0, end: this.liveSeekableRangeEnd } : undefined,
         media: this.loaded.length ? { ...this.loaded[this.loaded.length - 1], duration: 60 } : undefined,
       },
     ];

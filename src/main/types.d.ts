@@ -13,6 +13,17 @@ declare module 'castv2-client' {
   export class DefaultMediaReceiver {
     static APP_ID: string;
   }
+  export class Application {
+    static APP_ID: string;
+    constructor(client: any, session: any);
+    createController(Controller: any, ...args: any[]): any;
+    close(): void;
+  }
+  export class JsonController {
+    send(data: any): void;
+    on(event: 'message', cb: (data: any, broadcast?: boolean) => void): void;
+    on(event: 'close', cb: () => void): void;
+  }
 }
 
 declare module 'castv2' {

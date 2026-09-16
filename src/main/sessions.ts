@@ -9,6 +9,7 @@ import type { Device, MediaControlAction, SessionInfo, SessionState } from '@sha
 import { AirPlayClient, PairingRequiredError } from './airplay/client';
 import { MirrorClient } from './airplay/mirror';
 import { CastClient } from './cast/castClient';
+import type { MirroringSender } from './cast/mirroring';
 import type { StreamHub } from './streamHub';
 import type { LocalServer, RegisteredMedia } from './server';
 import type { CredentialStore } from './settings';
@@ -25,6 +26,7 @@ interface Session {
   airplay?: AirPlayClient;
   mirror?: MirrorClient;
   cast?: CastClient;
+  castMirror?: MirroringSender;
   media?: RegisteredMedia;
   stopping?: boolean;
   /** Set when the receiver accepted the stream but never fetched it from this PC. */
@@ -49,6 +51,14 @@ function unreachableMessage(name: string, port: number): string {
 /** How long to wait for a receiver to fetch the stream before calling it unreachable. */
 const REACH_TIMEOUT_MS = 12000;
 
+interface CastMirrorProbeSample {
+  data: Uint8Array;
+  keyframe: boolean;
+  timestampUs: number;
+  width: number;
+  height: number;
+}
+
 
 export interface SessionManagerOptions {
   hub: StreamHub;
@@ -57,6 +67,8 @@ export interface SessionManagerOptions {
   senderName: () => string;
   /** How long after LOAD a receiver has to request the stream before it is called unreachable. */
   reachTimeoutMs?: number;
+  /** Ask the renderer's Cast Streaming (VP8) tap for a fresh keyframe right now. */
+  requestCastMirrorKeyframe?: () => void;
 }
 
 export class SessionManager extends EventEmitter {
@@ -64,6 +76,11 @@ export class SessionManager extends EventEmitter {
   private pairingClients = new Map<string, AirPlayClient>();
   /** Active mirror sessions fed from the renderer's raw-H.264 tap. */
   private mirrorClients = new Map<string, MirrorClient>();
+  /** Active low-latency Cast Streaming sessions fed from the renderer's VP8 tap. */
+  private castMirrorClients = new Map<string, MirroringSender>();
+  private castMirrorProbing = false;
+  private castMirrorTapActive = false;
+  private castMirrorProbe: { resolve: (sample: CastMirrorProbeSample | null) => void } | null = null;
 
   constructor(private readonly opts: SessionManagerOptions) {
     super();
@@ -203,6 +220,18 @@ export class SessionManager extends EventEmitter {
       if (!session.stopping) this.setState(session, 'error', err.message);
     });
     const live = session.target.type === 'live';
+    if (live) {
+      // Chrome/Edge's own tab-casting reaches Chromecast/Google TV with well under a second
+      // of lag because it never touches HLS at all — it speaks Google's real-time "Cast
+      // Streaming" protocol (the "Chrome Mirroring" receiver app, 0F5096E8) directly. Try
+      // that path first; only fall back to the HLS/Default-Media-Receiver flow below if the
+      // receiver or this Chromium build cannot do it.
+      if (await this.tryConnectCastMirroring(session, client)) {
+        session.info.transport = 'cast-mirroring';
+        return;
+      }
+      log.info('session', `${device.name}: low-latency Cast mirroring unavailable, falling back to HLS`);
+    }
     // Launch (or join) the receiver app before starting the reachability clock. On a Sony
     // Bravia the launch alone took ~19 s; a clock started before it declared a perfectly
     // reachable TV unreachable and tore down a session that was already fetching segments.
@@ -226,6 +255,13 @@ export class SessionManager extends EventEmitter {
       subtitle: 'AirWing',
       hlsSegmentFormat: live ? 'fmp4' : undefined,
     });
+    if (live) {
+      // Correct for the receiver's own buffering drift instead of only setting the initial
+      // playlist cushion; see enableLiveCatchUp for why a static offset alone is not enough.
+      const target = Number(process.env.AIRWING_CAST_CATCHUP_TARGET ?? 2);
+      const max = Number(process.env.AIRWING_CAST_CATCHUP_MAX ?? target + 1.5);
+      client.enableLiveCatchUp(target, max);
+    }
     // Decide on evidence, not on a flag that may be stale: a receiver whose first request
     // arrived after the watchdog fired is a working session, not an unreachable one.
     if (reached()) {
@@ -233,6 +269,111 @@ export class SessionManager extends EventEmitter {
     } else if (session.unreachable) {
       throw new Error(session.unreachable);
     }
+  }
+
+  /**
+   * Attempt the low-latency Cast Streaming transport for a live cast: probe whether this
+   * Chromium build can encode VP8 at all, then OFFER/ANSWER against the Chrome Mirroring
+   * receiver app. Returns false (never throws) on any failure so the caller falls back to
+   * the proven HLS path — this is a strict upgrade attempt, not a required one.
+   */
+  private async tryConnectCastMirroring(session: Session, client: CastClient): Promise<boolean> {
+    const device = session.info.device;
+    try {
+      if (!(await this.opts.hub.waitForActive())) return false;
+      await this.opts.hub.waitForVideo();
+      const probe = await this.probeCastMirrorSupport();
+      if (!probe) {
+        log.info('session', `${device.name}: VP8 encoding is not available in this build`);
+        return false;
+      }
+      const meta = this.opts.hub.meta;
+      const sender = await client.startMirroring({
+        width: probe.width,
+        height: probe.height,
+        frameRateHint: meta?.encoder?.frameRate || 30,
+        maxBitrate: meta?.encoder?.videoBitrate || 6_000_000,
+      });
+      session.castMirror = sender;
+      sender.on('error', (err: Error) => {
+        if (session.stopping) return;
+        this.unregisterCastMirror(device.id);
+        this.setState(session, 'error', err.message);
+        this.cleanup(session);
+      });
+      this.registerCastMirror(device.id, sender);
+      // The probe frame predates the OFFER/ANSWER handshake and was never sent anywhere;
+      // get a fresh keyframe now so the receiver has something to decode from the start.
+      this.opts.requestCastMirrorKeyframe?.();
+      log.info('session', `${device.name}: Cast Streaming (low-latency) session established`);
+      return true;
+    } catch (err) {
+      log.warn('session', `${device.name}: Cast Streaming negotiation failed: ${(err as Error).message}`);
+      return false;
+    } finally {
+      this.setCastMirrorProbing(false);
+    }
+  }
+
+  /**
+   * Turn the renderer's VP8 tap on just long enough to learn whether this Chromium build can
+   * encode VP8, resolving with the first chunk it produces (which tells us the real encoded
+   * resolution) or null if it can't / nothing arrives in time.
+   */
+  private probeCastMirrorSupport(timeoutMs = 4000): Promise<CastMirrorProbeSample | null> {
+    this.setCastMirrorProbing(true);
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.castMirrorProbe = null;
+        resolve(null);
+      }, timeoutMs);
+      this.castMirrorProbe = {
+        resolve: (sample) => {
+          clearTimeout(timer);
+          resolve(sample);
+        },
+      };
+    });
+  }
+
+  /** Renderer reports it has no VP8 encoder at all; resolve any pending probe as a failure. */
+  markCastMirrorUnavailable(): void {
+    this.castMirrorProbe?.resolve(null);
+    this.castMirrorProbe = null;
+  }
+
+  /** Fan a VP8 chunk out to active low-latency Cast sessions, or satisfy a pending probe. */
+  pushCastMirrorFrame(chunk: Uint8Array, keyframe: boolean, timestampUs: number, width: number, height: number): void {
+    if (this.castMirrorProbe) {
+      const resolve = this.castMirrorProbe.resolve;
+      this.castMirrorProbe = null;
+      resolve({ data: chunk, keyframe, timestampUs, width, height });
+      return;
+    }
+    for (const s of this.castMirrorClients.values()) s.sendVideoFrame(chunk, keyframe, timestampUs);
+  }
+
+  private setCastMirrorProbing(probing: boolean): void {
+    this.castMirrorProbing = probing;
+    this.syncCastMirrorTap();
+  }
+
+  private registerCastMirror(id: string, s: MirroringSender): void {
+    this.castMirrorClients.set(id, s);
+    this.syncCastMirrorTap();
+  }
+
+  private unregisterCastMirror(id: string): void {
+    this.castMirrorClients.delete(id);
+    this.syncCastMirrorTap();
+  }
+
+  /** The renderer's VP8 tap should be on exactly while probing or while any session needs it. */
+  private syncCastMirrorTap(): void {
+    const shouldBeActive = this.castMirrorProbing || this.castMirrorClients.size > 0;
+    if (shouldBeActive === this.castMirrorTapActive) return;
+    this.castMirrorTapActive = shouldBeActive;
+    this.emit('castMirror-tap', shouldBeActive);
   }
 
   private async connectAirPlay(session: Session, url: string): Promise<void> {
@@ -459,6 +600,10 @@ export class SessionManager extends EventEmitter {
         this.unregisterMirror(session.info.device.id);
         await session.mirror.stop();
       }
+      if (session.castMirror) {
+        this.unregisterCastMirror(session.info.device.id);
+        session.castMirror.close();
+      }
       if (session.cast) await session.cast.stop();
       if (session.airplay) await session.airplay.stop();
     } catch (err) {
@@ -467,6 +612,7 @@ export class SessionManager extends EventEmitter {
     session.cast = undefined;
     session.airplay = undefined;
     session.mirror = undefined;
+    session.castMirror = undefined;
   }
 
   /** Called when a live session's receiver dropped; retry when the stream restarts. */

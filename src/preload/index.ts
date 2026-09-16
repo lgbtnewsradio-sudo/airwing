@@ -57,6 +57,11 @@ const api = {
     // access units, the renderer streams them straight to the mirror transport.
     onMirrorTap: (cb: (active: boolean) => void) => on<boolean>(IPC.mirrorTap, cb),
     sendMirrorFrame: (au: Uint8Array, keyframe: boolean, config?: Uint8Array) => ipcRenderer.send(IPC.mirrorFrame, au, keyframe, config),
+    // Google Cast low-latency (Cast Streaming / VP8) tap — see src/main/cast/mirroring.ts.
+    onCastMirrorTap: (cb: (active: boolean) => void) => on<boolean>(IPC.castMirrorTap, cb),
+    sendCastMirrorFrame: (chunk: Uint8Array, keyframe: boolean, timestampUs: number, width: number, height: number) =>
+      ipcRenderer.send(IPC.castMirrorFrame, chunk, keyframe, timestampUs, width, height),
+    sendCastMirrorUnavailable: () => ipcRenderer.send(IPC.castMirrorUnavailable),
     stats: (): Promise<StreamStats> => ipcRenderer.invoke(IPC.streamStats),
     onStats: (cb: (stats: StreamStats) => void) => on<StreamStats>(IPC.streamStats, cb),
   },

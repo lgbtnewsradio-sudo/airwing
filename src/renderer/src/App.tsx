@@ -59,6 +59,9 @@ export function App() {
         );
         // AirPlay screen-mirroring tap: forward raw avcC access units to the mirror transport.
         p.onRawVideo = (au, keyframe, cfg) => api.capture.sendMirrorFrame(au, keyframe, cfg);
+        // Google Cast low-latency (Cast Streaming / VP8) tap.
+        p.onRawVideoVp8 = (chunk, keyframe, ts, w, h) => api.capture.sendCastMirrorFrame(chunk, keyframe, ts, w, h);
+        p.onCastMirrorUnavailable = () => api.capture.sendCastMirrorUnavailable();
         return p;
       })(),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -96,6 +99,7 @@ export function App() {
       api.pairing.onPrompt(setPairing),
       api.app.onLog((ev) => setLogs((prev) => [...prev.slice(-499), ev])),
       api.capture.onMirrorTap((active) => pipeline.setMirrorTap(active)),
+      api.capture.onCastMirrorTap((active) => void pipeline.setCastMirrorTap(active)),
       api.capture.onCommand(async (cmd) => {
         try {
           if (cmd.type === 'start') {
@@ -105,6 +109,7 @@ export function App() {
           } else if (cmd.type === 'stop') await pipeline.stop();
           else if (cmd.type === 'pause') pipeline.setPaused(cmd.paused);
           else if (cmd.type === 'keyframe') pipeline.requestKeyframe();
+          else if (cmd.type === 'castMirrorKeyframe') pipeline.requestCastMirrorKeyframe();
         } catch (err) {
           setError((err as Error).message);
         }
@@ -135,6 +140,24 @@ export function App() {
     await api.capture.stop();
   }, [api]);
 
+  // Whether the current selection is complete enough to capture.
+  const sourceReady = config.sourceKind === 'audio' || (config.sourceKind === 'region' ? !!config.region : config.sourceKind === 'media' ? !!config.mediaPath : !!config.sourceId);
+
+  // The power button is a toggle. Stop used to leave it greyed out with no way back except
+  // re-picking the source or a receiver, which read as "the app won't start again".
+  const togglePower = useCallback(async () => {
+    if (captureState.active) {
+      await stopAll();
+      return;
+    }
+    setError(null);
+    try {
+      await api.capture.start({ ...configRef.current });
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }, [api, captureState.active, stopAll]);
+
   // Default to the primary display so the app is ready the moment it opens.
   useEffect(() => {
     if (config.sourceKind !== 'screen' || config.sourceId) return;
@@ -157,8 +180,7 @@ export function App() {
   );
   useEffect(() => {
     if (view !== 'main') return;
-    const ready = config.sourceKind === 'audio' || (config.sourceKind === 'region' ? !!config.region : config.sourceKind === 'media' ? !!config.mediaPath : !!config.sourceId);
-    if (!ready) return;
+    if (!sourceReady) return;
     const signature = `${selectTick}:${config.sourceKind}:${config.sourceId ?? ''}:${config.mediaPath ?? ''}:${JSON.stringify(config.region ?? null)}`;
     if (autoStarted.current === signature) return;
     autoStarted.current = signature;
@@ -264,7 +286,12 @@ export function App() {
       </div>
 
       <div className="toolbar">
-        <button className="tool" title={captureState.active ? 'Stop' : 'Not streaming'} disabled={!captureState.active && live.length === 0} onClick={stopAll}>
+        <button
+          className={`tool ${captureState.active ? 'on' : ''}`}
+          title={captureState.active ? 'Stop' : sourceReady ? 'Start' : 'Select a source first'}
+          disabled={!captureState.active && !sourceReady && live.length === 0}
+          onClick={togglePower}
+        >
           ⏻
         </button>
         <button className="tool" title={captureState.paused ? 'Resume' : 'Pause'} disabled={!captureState.active} onClick={() => api.capture.pause(!captureState.paused)}>

@@ -6,6 +6,7 @@
 import { EventEmitter } from 'node:events';
 import { Client, DefaultMediaReceiver } from 'castv2-client';
 import { log } from '../logger';
+import { MirroringApp, MirroringSender, OfferAnswerChannel, type MirroringVideoConfig } from './mirroring';
 
 export interface CastMedia {
   url: string;
@@ -27,6 +28,8 @@ export interface CastStatus {
   volume?: number;
   muted?: boolean;
   idleReason?: string;
+  /** LIVE streams only: the window of the stream the receiver can currently seek within. */
+  liveSeekableRange?: { start: number; end: number };
 }
 
 export interface CastClientOptions {
@@ -47,6 +50,7 @@ export class CastClient extends EventEmitter {
   private client: any = null;
   private player: any = null;
   private statusTimer: NodeJS.Timeout | null = null;
+  private mirroringApp: any = null;
   status: CastStatus = {};
   connected = false;
 
@@ -124,6 +128,7 @@ export class CastClient extends EventEmitter {
       volume: status.volume?.level,
       muted: status.volume?.muted,
       idleReason: status.idleReason,
+      liveSeekableRange: status.liveSeekableRange ? { start: status.liveSeekableRange.start, end: status.liveSeekableRange.end } : undefined,
     };
     this.emit('status', this.status);
     if (status.playerState === 'IDLE' && status.idleReason && status.idleReason !== 'INTERRUPTED') {
@@ -133,6 +138,41 @@ export class CastClient extends EventEmitter {
       }
       this.emit('idle', status.idleReason);
     }
+    this.maybeCatchUpToLive();
+  }
+
+  private liveCatchUp: { targetLagSec: number; maxLagSec: number } | null = null;
+  private lastCatchUpSeekAt = 0;
+  private readonly minCatchUpIntervalMs = 6000;
+
+  /**
+   * For a LIVE Cast session: periodically seek back toward the live edge if playback has
+   * drifted too far behind it. Left alone, the Default Media Receiver's own rebuffer-avoidance
+   * grows that gap over the course of a session rather than holding it steady — measured
+   * against a Sony Bravia, a stream that started ~3 s behind live drifted past 5 s within a
+   * minute with zero rebuffering, i.e. the receiver was deliberately falling further back. A
+   * playlist cushion alone cannot counteract a drift that keeps growing, so this actively
+   * corrects it instead.
+   */
+  enableLiveCatchUp(targetLagSec: number, maxLagSec: number): void {
+    this.liveCatchUp = { targetLagSec, maxLagSec };
+  }
+
+  private maybeCatchUpToLive(): void {
+    const cfg = this.liveCatchUp;
+    if (!cfg || !this.player) return;
+    const { playerState, currentTime, liveSeekableRange } = this.status;
+    // Only correct while genuinely playing: seeking during BUFFERING would fight whatever
+    // recovery the receiver is already attempting.
+    if (playerState !== 'PLAYING' || currentTime === undefined || !liveSeekableRange) return;
+    const lag = liveSeekableRange.end - currentTime;
+    if (lag <= cfg.maxLagSec) return;
+    const now = Date.now();
+    if (now - this.lastCatchUpSeekAt < this.minCatchUpIntervalMs) return;
+    this.lastCatchUpSeekAt = now;
+    const target = Math.max(liveSeekableRange.start, liveSeekableRange.end - cfg.targetLagSec);
+    log.info(this.scope, `catching up to live: lag ${lag.toFixed(1)}s > ${cfg.maxLagSec}s, seeking ${currentTime.toFixed(1)}s -> ${target.toFixed(1)}s`);
+    this.seek(target).catch((err) => log.warn(this.scope, `live catch-up seek failed: ${(err as Error).message}`));
   }
 
   /**
@@ -143,6 +183,28 @@ export class CastClient extends EventEmitter {
   async prepare(): Promise<void> {
     await this.connect();
     await this.launch();
+  }
+
+  /**
+   * Launch (or join) the Chrome Mirroring receiver app and negotiate a real-time Cast
+   * Streaming session for it — the low-latency path Chrome/Edge use for tab and desktop
+   * casting, separate from the Default Media Receiver's HLS-URL playback session. See
+   * ./mirroring for the wire format.
+   */
+  async startMirroring(video: MirroringVideoConfig): Promise<MirroringSender> {
+    await this.connect();
+    if (!this.mirroringApp) {
+      const sessions: any[] = await promisify((cb) => this.client.getSessions(cb));
+      const existing = sessions.find((s) => s.appId === MirroringApp.APP_ID);
+      this.mirroringApp = existing
+        ? await promisify((cb) => this.client.join(existing, MirroringApp, cb))
+        : await promisify((cb) => this.client.launch(MirroringApp, cb));
+      log.info(this.scope, `${existing ? 'joined' : 'launched'} Chrome Mirroring receiver app`);
+    }
+    const offerAnswer = new OfferAnswerChannel(this.mirroringApp.webrtc);
+    const sender = new MirroringSender(this.opts.host, offerAnswer);
+    await sender.start(video);
+    return sender;
   }
 
   async load(media: CastMedia): Promise<void> {
@@ -224,11 +286,17 @@ export class CastClient extends EventEmitter {
   close(): void {
     this.stopStatusPolling();
     try {
+      this.mirroringApp?.close();
+    } catch {
+      /* ignore */
+    }
+    try {
       this.client?.close();
     } catch {
       /* ignore */
     }
     this.player = null;
+    this.mirroringApp = null;
     this.client = null;
     this.connected = false;
   }

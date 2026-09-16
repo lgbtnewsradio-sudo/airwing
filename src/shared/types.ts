@@ -195,6 +195,9 @@ export const IPC = {
   captureCommand: 'capture:command',
   mirrorFrame: 'mirror:frame',
   mirrorTap: 'mirror:tap',
+  castMirrorFrame: 'castMirror:frame',
+  castMirrorTap: 'castMirror:tap',
+  castMirrorUnavailable: 'castMirror:unavailable',
   sessionConnect: 'session:connect',
   sessionDisconnect: 'session:disconnect',
   sessionsList: 'session:list',
@@ -282,6 +285,7 @@ export type CaptureCommand =
   | { type: 'start'; config: StreamConfig }
   | { type: 'stop' }
   | { type: 'pause'; paused: boolean }
-  | { type: 'keyframe' };
+  | { type: 'keyframe' }
+  | { type: 'castMirrorKeyframe' };
 
 export const RECEIVER_MDNS_SERVICE = '_airwing._tcp.local';

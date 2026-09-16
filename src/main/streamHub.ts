@@ -56,6 +56,7 @@ export class StreamHub extends EventEmitter {
       windowSize: Number(process.env.AIRWING_HLS_WINDOW ?? 8),
       audioOnly: meta.audioOnly,
       startOffsetSec: Number(process.env.AIRWING_HLS_CUSHION ?? 4),
+      targetDurationRounding: process.env.AIRWING_HLS_TARGET === 'round' ? 'round' : 'ceil',
       // Carry the counters across a restart. A receiver still polling the playlist must
       // never see the media sequence jump backwards, or it silently reuses the segment it
       // already has and sits on a frozen frame.

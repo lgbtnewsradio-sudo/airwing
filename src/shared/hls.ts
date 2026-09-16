@@ -28,6 +28,13 @@ export interface SegmenterOptions {
   /** How far behind the live edge receivers should start, in seconds. */
   startOffsetSec?: number;
   /**
+   * How EXT-X-TARGETDURATION is derived from the longest segment. 'ceil' rounds up; 'round'
+   * uses the nearest integer, which RFC 8216 §4.3.3.1 permits (each EXTINF rounded to the
+   * nearest integer must not exceed it). For ~1.03 s segments that is 1 instead of 2, and
+   * players hold back and size their buffering in multiples of the target duration.
+   */
+  targetDurationRounding?: 'ceil' | 'round';
+  /**
    * Continue numbering from a previous segmenter. HLS requires the media sequence to
    * never go backwards for a given playlist URL, and capture can stop and restart under
    * a receiver that is still polling, so the counters have to survive a restart.
@@ -59,6 +66,7 @@ export class HlsSegmenter {
   readonly windowSize: number;
   readonly audioOnly: boolean;
   readonly startOffsetSec: number;
+  readonly targetDurationRounding: 'ceil' | 'round';
   private readonly onSegment?: (segment: HlsSegment) => void;
   private init: Uint8Array | null = null;
   /** Every init segment still referenced by an available segment, keyed by version. */
@@ -89,6 +97,7 @@ export class HlsSegmenter {
     this.windowSize = opts.windowSize ?? 8;
     this.audioOnly = !!opts.audioOnly;
     this.startOffsetSec = opts.startOffsetSec ?? 0;
+    this.targetDurationRounding = opts.targetDurationRounding ?? 'ceil';
     this.nextSequence = opts.startSequence ?? 0;
     this.discontinuitySequence = opts.startDiscontinuitySequence ?? 0;
     this.initVersion = opts.startInitVersion ?? 0;
@@ -129,6 +138,12 @@ export class HlsSegmenter {
 
   get maxSegmentDurationSec(): number {
     return this.segments.reduce((m, s) => Math.max(m, s.durationSec), this.targetDurationSec);
+  }
+
+  /** EXT-X-TARGETDURATION as advertised in the playlist. */
+  get advertisedTargetDurationSec(): number {
+    const longest = this.maxSegmentDurationSec;
+    return this.targetDurationRounding === 'round' ? Math.max(1, Math.round(longest)) : Math.ceil(longest);
   }
 
   /**
@@ -227,7 +242,7 @@ export class HlsSegmenter {
     const lines = [
       '#EXTM3U',
       '#EXT-X-VERSION:7',
-      `#EXT-X-TARGETDURATION:${Math.ceil(this.maxSegmentDurationSec)}`,
+      `#EXT-X-TARGETDURATION:${this.advertisedTargetDurationSec}`,
       `#EXT-X-MEDIA-SEQUENCE:${this.segments[0]?.sequence ?? this.nextSequence}`,
       `#EXT-X-DISCONTINUITY-SEQUENCE:${this.discontinuitySequence}`,
       '#EXT-X-INDEPENDENT-SEGMENTS',

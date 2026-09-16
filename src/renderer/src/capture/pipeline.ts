@@ -103,6 +103,23 @@ export class CapturePipeline {
   private mirrorConfigSent = false;
   onRawVideo: ((au: Uint8Array, keyframe: boolean, config?: Uint8Array) => void) | null = null;
   /**
+   * Google Cast low-latency tap: a second, independent VP8 encoder fed the same paced frames
+   * as the primary H.264 one, for the real-time Cast Streaming ("mirroring") transport —
+   * see src/main/cast/mirroring.ts. Separate encoder because the receiver app for this path
+   * (Chrome Mirroring) requires VP8, not H.264.
+   */
+  private vp8Encoder: VideoEncoder | null = null;
+  private castMirrorTap = false;
+  private castMirrorKeyframeRequested = true;
+  private castMirrorLastKeyframeUs = -Infinity;
+  /** VP8 delta frames chain off the previous frame with no built-in recovery on loss (no
+   *  retransmission is implemented for Cast Streaming yet), so a single dropped packet would
+   *  otherwise freeze the picture forever. Re-keying periodically bounds that to one interval. */
+  private readonly castMirrorGopUs = 2_000_000;
+  onRawVideoVp8: ((chunk: Uint8Array, keyframe: boolean, timestampUs: number, width: number, height: number) => void) | null = null;
+  /** Fired if this Chromium build cannot encode VP8 at all, so the caller can fall back. */
+  onCastMirrorUnavailable: (() => void) | null = null;
+  /**
    * Serialises start/stop. Both are async and were independently reachable (the stop and
    * start IPC commands arrive on separate callbacks), so an in-flight teardown could run
    * its second half *after* a new start had built a fresh session and dismantle it —
@@ -376,6 +393,16 @@ export class CapturePipeline {
       this.lastKeyframeUs = ts;
     }
     (frame as any).__durationUs = durationTicks * this.frameIntervalUs;
+    if (this.castMirrorTap && this.vp8Encoder && this.vp8Encoder.state === 'configured' && this.vp8Encoder.encodeQueueSize <= 2) {
+      const vp8Key = this.castMirrorKeyframeRequested || ts - this.castMirrorLastKeyframeUs >= this.castMirrorGopUs;
+      if (vp8Key) {
+        this.castMirrorKeyframeRequested = false;
+        this.castMirrorLastKeyframeUs = ts;
+      }
+      const vp8Frame = frame.clone();
+      this.vp8Encoder.encode(vp8Frame, { keyFrame: vp8Key });
+      vp8Frame.close();
+    }
     this.videoEncoder.encode(frame, { keyFrame: key });
     frame.close();
   }
@@ -614,6 +641,11 @@ export class CapturePipeline {
     this.keyframeRequested = true;
   }
 
+  /** Ask the VP8 tap for a fresh keyframe (e.g. right after a Cast Streaming session negotiates). */
+  requestCastMirrorKeyframe(): void {
+    this.castMirrorKeyframeRequested = true;
+  }
+
   /** Turn the raw-H.264 mirror tap on or off. Enabling forces a fresh keyframe + config. */
   setMirrorTap(active: boolean): void {
     if (this.mirrorTap === active) return;
@@ -622,6 +654,58 @@ export class CapturePipeline {
       this.mirrorConfigSent = false;
       this.keyframeRequested = true; // the receiver needs an IDR + avcC to start decoding
     }
+  }
+
+  /**
+   * Turn the Cast Streaming (low-latency Chromecast) VP8 tap on or off. Lazily creates a
+   * second encoder alongside the primary H.264 one — most sessions never cast to Google Cast,
+   * so it costs nothing until asked for. Resolves once the encoder is confirmed usable (or
+   * calls onCastMirrorUnavailable and resolves anyway) so the caller can fall back promptly.
+   */
+  async setCastMirrorTap(active: boolean): Promise<void> {
+    if (this.castMirrorTap === active) return;
+    if (!active) {
+      this.castMirrorTap = false;
+      if (this.vp8Encoder && this.vp8Encoder.state !== 'closed') this.vp8Encoder.close();
+      this.vp8Encoder = null;
+      return;
+    }
+    if (!this.running || this.target.width <= 0 || this.target.height <= 0) {
+      this.onCastMirrorUnavailable?.();
+      return;
+    }
+    const cfg: VideoEncoderConfig = {
+      codec: 'vp8',
+      width: this.target.width,
+      height: this.target.height,
+      bitrate: pickBitrate(this.target.width, this.target.height, this.config?.frameRate ?? 30, this.config?.quality ?? 'balanced'),
+      framerate: this.config?.frameRate ?? 30,
+      latencyMode: 'realtime',
+      bitrateMode: 'variable',
+    };
+    try {
+      const support = await VideoEncoder.isConfigSupported(cfg);
+      if (!support.supported) throw new Error('VP8 not supported');
+    } catch {
+      console.warn('VP8 encoding is not available in this Chromium build; cannot use Cast Streaming');
+      this.onCastMirrorUnavailable?.();
+      return;
+    }
+    const encoder = new VideoEncoder({
+      output: (chunk) => this.onVp8Chunk(chunk),
+      error: (e) => console.warn('VP8 encoder error', e),
+    });
+    encoder.configure(cfg);
+    this.vp8Encoder = encoder;
+    this.castMirrorTap = true;
+    this.castMirrorKeyframeRequested = true;
+  }
+
+  private onVp8Chunk(chunk: EncodedVideoChunk): void {
+    if (!this.onRawVideoVp8) return;
+    const data = new Uint8Array(chunk.byteLength);
+    chunk.copyTo(data);
+    this.onRawVideoVp8(data, chunk.type === 'key', chunk.timestamp, this.target.width, this.target.height);
   }
 
   setPaused(paused: boolean): void {
@@ -678,6 +762,13 @@ export class CapturePipeline {
     }
     this.videoEncoder = null;
     this.audioEncoder = null;
+    try {
+      if (this.vp8Encoder && this.vp8Encoder.state !== 'closed') this.vp8Encoder.close();
+    } catch {
+      /* ignore */
+    }
+    this.vp8Encoder = null;
+    this.castMirrorTap = false;
     this.muxer?.flush();
     this.muxer = null;
     this.latestFrame?.close();

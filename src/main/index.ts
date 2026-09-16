@@ -82,7 +82,7 @@ const server = new LocalServer({
   deviceName: () => senderName(),
 });
 const discovery = new Discovery({ isPaired: (key) => !!credentials.get(key) });
-const sessions = new SessionManager({ hub, server, credentials, senderName: () => senderName() });
+const sessions = new SessionManager({ hub, server, credentials, senderName: () => senderName(), requestCastMirrorKeyframe: () => sendCaptureCommand({ type: 'castMirrorKeyframe' }) });
 
 /** Current capture request (set by the renderer before calling getDisplayMedia). */
 let pendingCapture: { sourceId: string; audio: boolean; muteLocal: boolean } | null = null;
@@ -478,6 +478,11 @@ function registerIpc(): void {
     const cfgBuf = config ? (config instanceof Uint8Array ? config : new Uint8Array(config)) : undefined;
     sessions.pushMirrorFrame(auBuf, keyframe, cfgBuf);
   });
+  ipcMain.on(IPC.castMirrorFrame, (_e, chunk: ArrayBuffer | Uint8Array, keyframe: boolean, timestampUs: number, width: number, height: number) => {
+    const buf = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
+    sessions.pushCastMirrorFrame(buf, keyframe, timestampUs, width, height);
+  });
+  ipcMain.on(IPC.castMirrorUnavailable, () => sessions.markCastMirrorUnavailable());
   ipcMain.on(IPC.streamState, (_e, state: { active: boolean; paused: boolean; dropped?: number; error?: string; reason?: string }) => {
     if (state.error) log.error('capture', state.error);
     else if (state.reason && !state.active) log.info('capture', `capture stopped: ${state.reason}`);
@@ -686,6 +691,8 @@ app.whenReady().then(async () => {
     send(IPC.mirrorTap, active);
     if (active && hub.active) sendCaptureCommand({ type: 'keyframe' });
   });
+  // Google Cast low-latency (Cast Streaming) mirroring: same idea, VP8 tap.
+  sessions.on('castMirror-tap', (active: boolean) => send(IPC.castMirrorTap, active));
   hub.on('stats', () => send(IPC.streamStats, hub.stats(sessions.count)));
   hub.on('meta', () => send(IPC.streamStats, hub.stats(sessions.count)));
   hub.on('end', () => send(IPC.streamStats, hub.stats(sessions.count)));
