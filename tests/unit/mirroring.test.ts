@@ -77,7 +77,7 @@ describe('Cast RTP frame layout and encryption', () => {
   // decrypt with AES-128-CTR using the documented IV construction, and read the Cast RTP
   // extension header at the fixed byte offsets mirroring.ts documents.
   function decodeFrame(packets: Buffer[], key: Buffer, ivMask: Buffer) {
-    const payload = Buffer.concat(packets.map((p) => p.subarray(23)));
+    const payload = Buffer.concat(packets.map((p) => p.subarray(19)));
     const first = packets[0];
     const frameId = first[13];
     const iv = Buffer.alloc(16);
@@ -89,12 +89,8 @@ describe('Cast RTP frame layout and encryption', () => {
       plain,
       keyFrame: (first[12] & 0x80) !== 0,
       hasReferenceFrameId: (first[12] & 0x40) !== 0,
-      extensionCount: first[12] & 0x1f,
       frameId,
       referencedFrameId: first[18],
-      adaptiveLatencyType: first[19],
-      adaptiveLatencySize: first[20],
-      playoutDelayMs: first.readUInt16BE(21),
       packetIds: packets.map((p) => p.readUInt16BE(14)),
       maxPacketId: first.readUInt16BE(16),
       payloadTypes: packets.map((p) => p[1] & 0x7f),
@@ -147,7 +143,7 @@ describe('Cast RTP frame layout and encryption', () => {
       const decoded = decodeFrame(sent, key, ivMask);
       expect(decoded.plain).toEqual(au);
       expect(decoded.keyFrame).toBe(true);
-      expect(decoded.frameId).toBe(0); // Chromium starts the wire sequence at zero
+      expect(decoded.frameId).toBe(1); // first frame
       expect(decoded.packetIds).toEqual([0]);
       expect(decoded.maxPacketId).toBe(0);
       expect(decoded.markerOnLast).toBe(true);
@@ -155,10 +151,6 @@ describe('Cast RTP frame layout and encryption', () => {
       // Real senders always set this bit; per encoded_frame.h a keyframe self-references.
       expect(decoded.hasReferenceFrameId).toBe(true);
       expect(decoded.referencedFrameId).toBe(decoded.frameId);
-      expect(decoded.extensionCount).toBe(1);
-      expect(decoded.adaptiveLatencyType).toBe(0x04);
-      expect(decoded.adaptiveLatencySize).toBe(2);
-      expect(decoded.playoutDelayMs).toBe(800);
     } finally {
       sender.close();
       listener.close();
@@ -189,13 +181,6 @@ describe('Cast RTP frame layout and encryption', () => {
       expect((sent[2][1] & 0x80) !== 0).toBe(false);
       // Every packet of the frame (not just the first) must carry the RFID bit + byte.
       for (const p of sent) expect((p[12] & 0x40) !== 0).toBe(true);
-      // And every packet carries the Adaptive Latency extension, matching Chrome.
-      for (const p of sent) {
-        expect(p[12] & 0x1f).toBe(1);
-        expect(p[19]).toBe(0x04);
-        expect(p[20]).toBe(2);
-        expect(p.readUInt16BE(21)).toBe(800);
-      }
     } finally {
       sender.close();
       listener.close();
@@ -260,8 +245,8 @@ describe('Cast RTP frame layout and encryption', () => {
       await new Promise((r) => setTimeout(r, 100));
       const sent = raw.filter(isVideoPacket);
       expect(sent.length).toBe(2);
-      const cipher1 = sent[0].subarray(23);
-      const cipher2 = sent[1].subarray(23);
+      const cipher1 = sent[0].subarray(19);
+      const cipher2 = sent[1].subarray(19);
       expect(cipher1.equals(cipher2)).toBe(false); // same plaintext, different frame id -> different keystream
       const key = (sender as any).videoKey as Buffer;
       const ivMask = (sender as any).videoIvMask as Buffer;

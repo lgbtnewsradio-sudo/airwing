@@ -43,19 +43,12 @@ export const WEBRTC_NAMESPACE = 'urn:x-cast:com.google.cast.webrtc';
 /** Max UDP payload per Cast RTP packet, leaving headroom under common MTUs. */
 const MAX_PACKET_PAYLOAD = 1200;
 /**
- * Cast RTP header: 12-byte standard RTP header, then a 7-byte Cast frame header and Chromium's
- * 4-byte Adaptive Latency extension. The extension is not cosmetic: without its explicit
- * playout target, Google TV falls back to its conservative multi-second jitter buffer even when
- * the sender is delivering frames in real time.
+ * Cast RTP header: 12-byte standard RTP header + 7-byte Cast frame header (flags, frame id,
+ * packet id, max packet id, referenced frame id). The Bravia's Chrome Mirroring receiver
+ * accepts this layout. Its legacy 0F5096E8 receiver rejected the newer Adaptive-Latency
+ * extension layout introduced in 1.1.4, so that extension must not be sent to this app.
  */
-const RTP_HEADER_SIZE = 23;
-const CAST_FRAME_HEADER_SIZE = 7;
-/** Chrome normally advertises 0x0320 (800 ms). This leaves room for Wi-Fi jitter while staying
- * comfortably under AirWing's 2-second live-mirroring goal. */
-const CAST_PLAYOUT_DELAY_MS = 800;
-/** Cast RTP extension wire id for Adaptive Latency, followed by its two-byte payload length. */
-const CAST_ADAPTIVE_LATENCY_EXTENSION_TYPE = 0x04;
-const CAST_ADAPTIVE_LATENCY_EXTENSION_SIZE = 0x02;
+const RTP_HEADER_SIZE = 19;
 /** video_source stream, matches a real captured Chrome OFFER (rtpPayloadType 96, not 101). */
 const VIDEO_RTP_PAYLOAD_TYPE = 96;
 const VIDEO_TIME_BASE_HZ = 90000;
@@ -149,9 +142,7 @@ export class MirroringSender extends EventEmitter {
   private readonly videoKey = randomBytes(16);
   private readonly videoIvMask = randomBytes(16);
   private seqCounter = Math.floor(Math.random() * 0x10000);
-  // Chromium's Cast sender starts the 8-bit wire frame-id sequence at zero. Some legacy
-  // receiver implementations reconstruct references from that initial value.
-  private frameCounter = -1;
+  private frameCounter = 0;
   private firstFrameDispatched = false;
   private packetsSent = 0;
   private octetsSent = 0;
@@ -219,7 +210,7 @@ export class MirroringSender extends EventEmitter {
     this.socket.on('message', (msg) => {
       if (!sawReceiverTraffic) {
         sawReceiverTraffic = true;
-        log.info(this.scope, `receiver sent its first packet back (${msg.length} bytes) — session is live`);
+        log.info(this.scope, `receiver sent its first packet back (${msg.length} bytes) — session is live; feedback=${msg.toString('hex').slice(0, 128)}`);
       }
       this.handleIncomingRtcp(msg);
     });
@@ -394,17 +385,12 @@ export class MirroringSender extends EventEmitter {
       header.writeUInt32BE(opts.rtpTimestamp, 4);
       header.writeUInt32BE(this.videoSsrc, 8);
       // Real senders always set the "reference frame id provided" bit (0x40), for every
-      // frame including keyframes, and include one Adaptive Latency extension (low five bits).
-      header[12] = (opts.keyFrame ? 0x80 : 0x00) | 0x40 | 0x01;
+      // frame including keyframes.
+      header[12] = (opts.keyFrame ? 0x80 : 0x00) | 0x40;
       header[13] = opts.frameId & 0xff;
       header.writeUInt16BE(i, 14); // packet id
       header.writeUInt16BE(totalPackets - 1, 16); // max packet id
       header[18] = opts.referencedFrameId & 0xff;
-      // Chromium's Cast packetizer serializes this extension on each packet. Google TV uses it
-      // to set playout instead of guessing an overly-safe 4–6-second buffer.
-      header[12 + CAST_FRAME_HEADER_SIZE] = CAST_ADAPTIVE_LATENCY_EXTENSION_TYPE;
-      header[13 + CAST_FRAME_HEADER_SIZE] = CAST_ADAPTIVE_LATENCY_EXTENSION_SIZE;
-      header.writeUInt16BE(CAST_PLAYOUT_DELAY_MS, 14 + CAST_FRAME_HEADER_SIZE);
       packets.push(Buffer.concat([header, chunk]));
     }
     return packets;
