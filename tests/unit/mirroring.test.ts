@@ -77,7 +77,7 @@ describe('Cast RTP frame layout and encryption', () => {
   // decrypt with AES-128-CTR using the documented IV construction, and read the Cast RTP
   // extension header at the fixed byte offsets mirroring.ts documents.
   function decodeFrame(packets: Buffer[], key: Buffer, ivMask: Buffer) {
-    const payload = Buffer.concat(packets.map((p) => p.subarray(19)));
+    const payload = Buffer.concat(packets.map((p) => p.subarray(23)));
     const first = packets[0];
     const frameId = first[13];
     const iv = Buffer.alloc(16);
@@ -89,8 +89,12 @@ describe('Cast RTP frame layout and encryption', () => {
       plain,
       keyFrame: (first[12] & 0x80) !== 0,
       hasReferenceFrameId: (first[12] & 0x40) !== 0,
+      extensionCount: first[12] & 0x1f,
       frameId,
       referencedFrameId: first[18],
+      adaptiveLatencyType: first[19],
+      adaptiveLatencySize: first[20],
+      playoutDelayMs: first.readUInt16BE(21),
       packetIds: packets.map((p) => p.readUInt16BE(14)),
       maxPacketId: first.readUInt16BE(16),
       payloadTypes: packets.map((p) => p[1] & 0x7f),
@@ -131,7 +135,7 @@ describe('Cast RTP frame layout and encryption', () => {
     const { sender, listener, sent: raw } = await harness();
     try {
       const au = Buffer.from('a fake vp8 keyframe payload, well under one packet');
-      sender.sendVideoFrame(au, true, 0);
+      sender.sendVideoFrame(au, true);
       await new Promise((r) => setTimeout(r, 200));
       const sent = raw.filter(isVideoPacket);
       expect(sent.length).toBe(1);
@@ -143,7 +147,7 @@ describe('Cast RTP frame layout and encryption', () => {
       const decoded = decodeFrame(sent, key, ivMask);
       expect(decoded.plain).toEqual(au);
       expect(decoded.keyFrame).toBe(true);
-      expect(decoded.frameId).toBe(1); // first frame
+      expect(decoded.frameId).toBe(0); // Chromium starts the wire sequence at zero
       expect(decoded.packetIds).toEqual([0]);
       expect(decoded.maxPacketId).toBe(0);
       expect(decoded.markerOnLast).toBe(true);
@@ -151,6 +155,10 @@ describe('Cast RTP frame layout and encryption', () => {
       // Real senders always set this bit; per encoded_frame.h a keyframe self-references.
       expect(decoded.hasReferenceFrameId).toBe(true);
       expect(decoded.referencedFrameId).toBe(decoded.frameId);
+      expect(decoded.extensionCount).toBe(1);
+      expect(decoded.adaptiveLatencyType).toBe(0x04);
+      expect(decoded.adaptiveLatencySize).toBe(2);
+      expect(decoded.playoutDelayMs).toBe(800);
     } finally {
       sender.close();
       listener.close();
@@ -163,7 +171,7 @@ describe('Cast RTP frame layout and encryption', () => {
       // ~3.5x the 1200-byte packet payload cap -> 4 packets.
       const au = Buffer.alloc(4200);
       for (let i = 0; i < au.length; i++) au[i] = i & 0xff;
-      sender.sendVideoFrame(au, false, 0);
+      sender.sendVideoFrame(au, false);
       await new Promise((r) => setTimeout(r, 200));
       const sent = raw.filter(isVideoPacket);
       expect(sent.length).toBe(4);
@@ -181,6 +189,13 @@ describe('Cast RTP frame layout and encryption', () => {
       expect((sent[2][1] & 0x80) !== 0).toBe(false);
       // Every packet of the frame (not just the first) must carry the RFID bit + byte.
       for (const p of sent) expect((p[12] & 0x40) !== 0).toBe(true);
+      // And every packet carries the Adaptive Latency extension, matching Chrome.
+      for (const p of sent) {
+        expect(p[12] & 0x1f).toBe(1);
+        expect(p[19]).toBe(0x04);
+        expect(p[20]).toBe(2);
+        expect(p.readUInt16BE(21)).toBe(800);
+      }
     } finally {
       sender.close();
       listener.close();
@@ -190,9 +205,9 @@ describe('Cast RTP frame layout and encryption', () => {
   it('always sets the "reference frame id provided" bit and byte, matching real Chrome senders (cast/streaming/impl/rtp_packetizer.cc always sets it, for every frame including keyframes) — the missing byte here caused delta frames to misbehave on real hardware', async () => {
     const { sender, listener, sent: raw } = await harness();
     try {
-      sender.sendVideoFrame(Buffer.from('keyframe payload'), true, 0);
+      sender.sendVideoFrame(Buffer.from('keyframe payload'), true);
       await new Promise((r) => setTimeout(r, 100));
-      sender.sendVideoFrame(Buffer.from('delta frame payload'), false, 33333);
+      sender.sendVideoFrame(Buffer.from('delta frame payload'), false);
       await new Promise((r) => setTimeout(r, 100));
       const [key, delta] = raw.filter(isVideoPacket);
       const decodedKey = decodeFrame([key], (sender as any).videoKey, (sender as any).videoIvMask);
@@ -211,7 +226,7 @@ describe('Cast RTP frame layout and encryption', () => {
   it('sends an RTCP Sender Report immediately once media starts, then periodically', async () => {
     const { sender, listener, sent } = await harness();
     try {
-      sender.sendVideoFrame(Buffer.from('first frame'), true, 0);
+      sender.sendVideoFrame(Buffer.from('first frame'), true);
       await new Promise((r) => setTimeout(r, 150));
       // First datagram after a video frame's own packet(s) should be a Sender Report,
       // sent immediately rather than waiting a full interval.
@@ -239,14 +254,14 @@ describe('Cast RTP frame layout and encryption', () => {
     const { sender, listener, sent: raw } = await harness();
     try {
       const au = Buffer.from('identical payload bytes sent twice in a row');
-      sender.sendVideoFrame(au, true, 0);
+      sender.sendVideoFrame(au, true);
       await new Promise((r) => setTimeout(r, 100));
-      sender.sendVideoFrame(au, false, 33333);
+      sender.sendVideoFrame(au, false);
       await new Promise((r) => setTimeout(r, 100));
       const sent = raw.filter(isVideoPacket);
       expect(sent.length).toBe(2);
-      const cipher1 = sent[0].subarray(19);
-      const cipher2 = sent[1].subarray(19);
+      const cipher1 = sent[0].subarray(23);
+      const cipher2 = sent[1].subarray(23);
       expect(cipher1.equals(cipher2)).toBe(false); // same plaintext, different frame id -> different keystream
       const key = (sender as any).videoKey as Buffer;
       const ivMask = (sender as any).videoIvMask as Buffer;

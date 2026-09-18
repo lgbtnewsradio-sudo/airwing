@@ -301,6 +301,9 @@ export class SessionManager extends EventEmitter {
         this.setState(session, 'error', err.message);
         this.cleanup(session);
       });
+      // A bounded sender queue intentionally abandons an undecodable delta chain rather than
+      // letting it turn into latency. Ask WebCodecs for a clean recovery frame immediately.
+      sender.on('keyframe-needed', () => this.opts.requestCastMirrorKeyframe?.());
       this.registerCastMirror(device.id, sender);
       // The probe frame predates the OFFER/ANSWER handshake and was never sent anywhere;
       // get a fresh keyframe now so the receiver has something to decode from the start.
@@ -350,7 +353,7 @@ export class SessionManager extends EventEmitter {
       resolve({ data: chunk, keyframe, timestampUs, width, height });
       return;
     }
-    for (const s of this.castMirrorClients.values()) s.sendVideoFrame(chunk, keyframe, timestampUs);
+    for (const s of this.castMirrorClients.values()) s.sendVideoFrame(chunk, keyframe);
   }
 
   private setCastMirrorProbing(probing: boolean): void {

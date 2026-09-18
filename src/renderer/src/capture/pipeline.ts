@@ -119,6 +119,19 @@ export class CapturePipeline {
    *  retransmission is implemented for Cast Streaming yet), so a single dropped packet would
    *  otherwise freeze the picture forever. Re-keying periodically bounds that to one interval. */
   private readonly castMirrorGopUs = 2_000_000;
+  /**
+   * Diagnostic only: how long each frame spends inside the VP8 encoder (encode() call to
+   * output callback), to tell encoder-bound latency apart from anything downstream (network,
+   * receiver buffering) if lag is ever reported again after the CPU/720p fix. Logged as a
+   * periodic summary, not per-frame, and forwarded to the main-process log via console.log
+   * (see the `console-message` forwarder in src/main/index.ts) so it lands in the same log
+   * file the user already knows to paste back.
+   */
+  private readonly vp8EncodeStart = new Map<number, number>();
+  private vp8LatSum = 0;
+  private vp8LatMax = 0;
+  private vp8LatCount = 0;
+  private vp8LatWindowStartMs = 0;
   onRawVideoVp8: ((chunk: Uint8Array, keyframe: boolean, timestampUs: number, width: number, height: number) => void) | null = null;
   /** Fired if this Chromium build cannot encode VP8 at all, so the caller can fall back. */
   onCastMirrorUnavailable: (() => void) | null = null;
@@ -403,6 +416,8 @@ export class CapturePipeline {
         this.castMirrorLastKeyframeUs = ts;
       }
       const vp8Frame = frame.clone();
+      if (this.vp8EncodeStart.size > 90) this.vp8EncodeStart.clear(); // safety net; should be ~empty steady-state
+      this.vp8EncodeStart.set(vp8Frame.timestamp, performance.now());
       this.vp8Encoder.encode(vp8Frame, { keyFrame: vp8Key });
       vp8Frame.close();
     }
@@ -671,6 +686,11 @@ export class CapturePipeline {
       this.castMirrorTap = false;
       if (this.vp8Encoder && this.vp8Encoder.state !== 'closed') this.vp8Encoder.close();
       this.vp8Encoder = null;
+      this.vp8EncodeStart.clear();
+      this.vp8LatSum = 0;
+      this.vp8LatMax = 0;
+      this.vp8LatCount = 0;
+      this.vp8LatWindowStartMs = 0;
       return;
     }
     if (!this.running || this.target.width <= 0 || this.target.height <= 0) {
@@ -716,6 +736,9 @@ export class CapturePipeline {
       this.onCastMirrorUnavailable?.();
       return;
     }
+    // Which accelerator actually won was never logged, so a silent software fallback (the
+    // exact condition the 720p cap above exists to avoid) was invisible until now.
+    console.log(`[vp8cfg] accel=${cfg.hardwareAcceleration} ${vp8Width}x${vp8Height}@${frameRate} bitrate=${bitrate}`);
     this.vp8Width = vp8Width;
     this.vp8Height = vp8Height;
     const encoder = new VideoEncoder({
@@ -729,6 +752,23 @@ export class CapturePipeline {
   }
 
   private onVp8Chunk(chunk: EncodedVideoChunk): void {
+    const startedAt = this.vp8EncodeStart.get(chunk.timestamp);
+    if (startedAt !== undefined) {
+      this.vp8EncodeStart.delete(chunk.timestamp);
+      const latencyMs = performance.now() - startedAt;
+      this.vp8LatSum += latencyMs;
+      this.vp8LatMax = Math.max(this.vp8LatMax, latencyMs);
+      this.vp8LatCount++;
+      const now = performance.now();
+      if (this.vp8LatWindowStartMs === 0) this.vp8LatWindowStartMs = now;
+      if (now - this.vp8LatWindowStartMs >= 2000 && this.vp8LatCount > 0) {
+        console.log(`[vp8lat] avg=${(this.vp8LatSum / this.vp8LatCount).toFixed(1)}ms max=${this.vp8LatMax.toFixed(1)}ms n=${this.vp8LatCount}`);
+        this.vp8LatSum = 0;
+        this.vp8LatMax = 0;
+        this.vp8LatCount = 0;
+        this.vp8LatWindowStartMs = now;
+      }
+    }
     if (!this.onRawVideoVp8) return;
     const data = new Uint8Array(chunk.byteLength);
     chunk.copyTo(data);

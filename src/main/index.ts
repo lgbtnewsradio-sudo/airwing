@@ -134,6 +134,13 @@ function createWindow(): BrowserWindow {
   win.once('ready-to-show', () => {
     if (!settings.get().startMinimized || process.argv.includes('--show')) win.show();
   });
+  // The renderer's VP8 diagnostics (pipeline.ts, tagged "[vp8lat]"/"[vp8cfg]") log via
+  // console.log, which Chromium only surfaces to DevTools by default. Forward just those tags
+  // into the persistent file logger so they show up wherever the rest of the session log does,
+  // without piping every renderer console message (render warnings etc. are noisy) to disk.
+  win.webContents.on('console-message', (_e, _level, message) => {
+    if (message.startsWith('[vp8lat]') || message.startsWith('[vp8cfg]')) log.info('vp8', message);
+  });
   win.on('close', (e) => {
     // Only stay resident when something is actually receiving. Capture now starts on its
     // own as soon as a source is selected, so keying this off hub.active alone meant the
