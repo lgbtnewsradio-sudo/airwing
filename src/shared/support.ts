@@ -13,13 +13,21 @@ export function appleTvGeneration(model?: string): number | null {
 
 /**
  * Whether a receiver needs AirWing's FairPlay screen-mirroring transport (tvOS Apple TVs,
- * 4th generation "AppleTV5,3" and later). These speak the encrypted mirroring protocol
- * rather than the /play HLS path; AirWing now drives that transport for them.
+ * 4th generation "AppleTV5,3" and later, plus any AirPlay 2 receiver). These speak the
+ * encrypted mirroring protocol rather than the /play HLS path; AirWing now drives that
+ * transport for them.
  */
-export function needsFairPlay(device: Pick<Device, 'kind' | 'model'>): boolean {
+export function needsFairPlay(device: Pick<Device, 'kind' | 'model' | 'caps'>): boolean {
   if (device.kind !== 'airplay' && device.kind !== 'raop') return false;
   const gen = appleTvGeneration(device.model);
-  return gen !== null && gen >= 5;
+  if (gen !== null && gen >= 5) return true;
+  // Third-party AirPlay 2 receivers (smart TVs with AirPlay built in) never advertise Apple's
+  // own AppleTV<gen>,<model> string — appleTvGeneration() can never match them — but they speak
+  // the same encrypted mirroring protocol as a real 4th-gen+ Apple TV. discovery.ts already
+  // computes airplayVersion from the mDNS feature-bit mask itself (SupportsHKPairing etc.),
+  // which is the actual protocol-level signal Apple's own AirPlay senders key off of, so use
+  // that directly instead of trying to guess a non-Apple vendor's model string.
+  return device.caps.airplayVersion === 2;
 }
 
 /**

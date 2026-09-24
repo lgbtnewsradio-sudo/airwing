@@ -2,17 +2,22 @@
  * AirPlay 2 real-time screen mirroring sender (the low-latency path AirParrot uses).
  *
  * Encoded H.264 access units are pushed straight down a TCP data channel, each behind a
- * 128-byte header, with no HLS segment buffering. A modern Apple TV gates this behind
- * Apple's FairPlay SAP handshake (see ./fairplay) plus a HAP-encrypted control channel.
+ * 128-byte header, with no HLS segment buffering. A real Apple TV gates this behind Apple's
+ * FairPlay SAP handshake (see ./fairplay) plus a HAP-encrypted control channel; third-party
+ * AirPlay 2 receivers (smart TVs with AirPlay built in) commonly implement the HAP pairing
+ * and mirroring RTSP flow but not /fp-setup at all — 404 there just means "skip FairPlay",
+ * not a fatal error (see fairPlaySetup()), since the actual video stream key is derived from
+ * the pair-verify shared secret either way, independent of anything FairPlay produces.
  *
  * Sequence for a modern (encrypted, PTP) receiver:
- *   pair-verify (caller) -> POST /fp-setup m1/m3 -> control SETUP (anchors PTP clock)
- *   -> RECORD -> audio SETUP (type 96 descriptor, no packets in video-only mode)
+ *   pair-verify (caller) -> POST /fp-setup m1/m3, if supported -> control SETUP (anchors PTP
+ *   clock) -> RECORD -> audio SETUP (type 96 descriptor, no packets in video-only mode)
  *   -> video SETUP (type 110) -> connect TCP data port -> stream codec + video frames.
  *
  * This is a faithful TypeScript port of the GPL-3.0 doubletake project's MirrorSession for
  * the encrypted/PTP/ChaCha20-Poly1305/H.264 path; see NOTICE. It is validated end-to-end
- * only against a live Apple TV, so it logs each protocol step under scope "mirror:*".
+ * against a live Apple TV, so it logs each protocol step under scope "mirror:*"; the
+ * FairPlay-optional path is validated only by 404 evidence from a real third-party TV so far.
  */
 
 import net from 'node:net';
@@ -69,6 +74,11 @@ function fromPlist(body: Buffer): Record<string, any> | null {
   } catch {
     return null;
   }
+}
+
+/** bplist-parser can yield native BigInt for 64-bit integers, which JSON.stringify rejects. */
+function safeStringify(value: unknown): string {
+  return JSON.stringify(value, (_key, v) => (typeof v === 'bigint' ? v.toString() : v)) ?? 'undefined';
 }
 
 function plistUint64(value: unknown): bigint {
@@ -234,13 +244,25 @@ class MediaClock {
   timelineID = 0n;
 
   configureFromSetup(response: Record<string, any> | null, headers: Record<string, string>, receivedAtMs: number): boolean {
-    const peer = response?.timingPeerInfo as Record<string, any> | undefined;
+    if (!response) return false;
+    const peer = response.timingPeerInfo as Record<string, any> | undefined;
     this.timelineID = plistUint64(peer?.ClockID ?? peer?.clockID);
-    if (this.timelineID === 0n) return false;
+    if (this.timelineID === 0n) {
+      // Some AirPlay 2 receivers never assign a PTP clock id — their timingPeerInfo just
+      // echoes their own address list (ID/Addresses/SupportsClockPortMatchingOverride), the
+      // same shape we send as our own, not a clock identity. Since no real IEEE-1588 daemon
+      // runs on this path even against a real Apple TV, this id only has to be a stable value
+      // used consistently within our own frame headers — it doesn't need to be receiver-issued.
+      this.timelineID = BigInt('0x' + randomBytes(8).toString('hex'));
+    }
     const received = parseInt(headers['x-apple-requestreceivedtimestamp'] ?? '', 10);
     const processing = parseInt(headers['x-apple-processingtime'] ?? '', 10);
-    if (!Number.isFinite(received)) return false;
-    this.anchorTimestamp = compactTimestamp(received + (Number.isFinite(processing) ? processing : 0));
+    // Likewise, fall back to our own wall clock if the receiver gives no clock reference
+    // either: absolute cross-device alignment matters for synced multi-room audio, not for
+    // mirroring a single screen to a single receiver.
+    this.anchorTimestamp = Number.isFinite(received)
+      ? compactTimestamp(received + (Number.isFinite(processing) ? processing : 0))
+      : compactTimestamp(Date.now());
     this.anchorLocalMs = receivedAtMs;
     return true;
   }
@@ -335,8 +357,14 @@ export class MirrorClient extends EventEmitter {
     if (ctrl.code !== 200) throw new Error(`control SETUP failed: ${ctrl.code} ${ctrl.message}`);
     const ctrlResp = fromPlist(ctrl.body);
     log.info(this.scope, `control SETUP -> ${ctrl.code}; resp keys: [${ctrlResp ? Object.keys(ctrlResp).join(', ') : 'none'}]; eventPort=${ctrlResp?.eventPort ?? '-'} skipRecord=${ctrlResp?.skipRecord ?? '-'}`);
+    const setupPeer = ctrlResp?.timingPeerInfo as Record<string, any> | undefined;
+    if (plistUint64(setupPeer?.ClockID ?? setupPeer?.clockID) === 0n) {
+      // Real Apple TVs put the timeline id at timingPeerInfo.ClockID; some third-party AirPlay
+      // 2 receivers never do — see MediaClock.configureFromSetup for why that's survivable.
+      log.warn(this.scope, `receiver gave no PTP clock id (timingPeerInfo=${safeStringify(setupPeer)}); using a synthesized local timeline instead`);
+    }
     if (!this.clock.configureFromSetup(ctrlResp, ctrl.headers, t0)) {
-      throw new Error('control SETUP did not return a PTP timeline (timingPeerInfo.ClockID)');
+      throw new Error('control SETUP returned no session body to anchor a timeline from');
     }
     log.info(this.scope, `control SETUP ok; PTP timeline 0x${this.clock.timelineID.toString(16)}`);
 
@@ -384,8 +412,9 @@ export class MirrorClient extends EventEmitter {
       streamConnectionID: this.videoConnId,
       latencyMs: VIDEO_BIAS_MS,
       timestampInfo: [{ name: 'SubSu' }, { name: 'BePxT' }, { name: 'AfPxT' }, { name: 'BefEn' }, { name: 'EmEnc' }],
-      shk: this.fpKey,
-      shiv: this.fpIV,
+      // Only present when fairPlaySetup() actually ran; a bplist has no native null, and a
+      // receiver with no /fp-setup endpoint never asked for these anyway.
+      ...(this.fpKey && this.fpIV ? { shk: this.fpKey, shiv: this.fpIV } : {}),
     };
     const vresp = await this.rtsp('SETUP', videoURI, toPlist({ streams: [videoStream] }));
     if (vresp.code !== 200) throw new Error(`video SETUP failed: ${vresp.code} ${vresp.message}`);
@@ -420,6 +449,15 @@ export class MirrorClient extends EventEmitter {
     const fpHeaders = { 'User-Agent': 'AirPlay/550.10', 'Content-Type': 'application/octet-stream', 'X-Apple-ET': 32 };
     const m1 = session.message1();
     const r2 = await this.conn.post('/fp-setup', { headers: fpHeaders, body: Buffer.from(m1), allowError: true, timeoutMs: 8000 });
+    if (r2.code === 404) {
+      // Not every AirPlay 2 receiver implements FairPlay DRM — the actual video stream key
+      // (chachaKey, derived below in start()) comes from the pair-verify shared secret, not
+      // from anything FairPlay produces, so a receiver with no /fp-setup endpoint at all isn't
+      // missing key material it needs; only the shk/shiv hint fields in the video SETUP go
+      // unset for it (see start()).
+      log.info(this.scope, 'receiver has no /fp-setup endpoint; continuing without FairPlay');
+      return;
+    }
     if (r2.code !== 200) throw new Error(`fp-setup m1 -> ${r2.code}`);
     const m3 = session.exchangeM3(r2.body);
     const r4 = await this.conn.post('/fp-setup', { headers: fpHeaders, body: Buffer.from(m3), allowError: true, timeoutMs: 8000 });
