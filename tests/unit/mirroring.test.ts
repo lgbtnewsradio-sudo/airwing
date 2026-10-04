@@ -143,7 +143,7 @@ describe('Cast RTP frame layout and encryption', () => {
       const decoded = decodeFrame(sent, key, ivMask);
       expect(decoded.plain).toEqual(au);
       expect(decoded.keyFrame).toBe(true);
-      expect(decoded.frameId).toBe(1); // first frame
+      expect(decoded.frameId).toBe(0); // Cast FrameId::first(); 0xff is the pre-stream leader
       expect(decoded.packetIds).toEqual([0]);
       expect(decoded.maxPacketId).toBe(0);
       expect(decoded.markerOnLast).toBe(true);
@@ -208,6 +208,24 @@ describe('Cast RTP frame layout and encryption', () => {
     }
   });
 
+  it('does not expose a wire FrameId gap when the pacing queue replaces a pending delta with a keyframe', async () => {
+    const { sender, listener, sent: raw } = await harness();
+    try {
+      sender.sendVideoFrame(Buffer.from('initial keyframe'), true);
+      await new Promise((r) => setTimeout(r, 100));
+      sender.sendVideoFrame(Buffer.from('delta that will be dropped before dispatch'), false);
+      sender.sendVideoFrame(Buffer.from('replacement keyframe'), true);
+      await new Promise((r) => setTimeout(r, 120));
+      const sent = raw.filter(isVideoPacket);
+      expect(sent).toHaveLength(2);
+      expect(sent.map((packet) => packet[13])).toEqual([0, 1]);
+      expect(sent.map((packet) => (packet[12] & 0x80) !== 0)).toEqual([true, true]);
+    } finally {
+      sender.close();
+      listener.close();
+    }
+  });
+
   it('sends an RTCP Sender Report immediately once media starts, then periodically', async () => {
     const { sender, listener, sent } = await harness();
     try {
@@ -252,6 +270,51 @@ describe('Cast RTP frame layout and encryption', () => {
       const ivMask = (sender as any).videoIvMask as Buffer;
       expect(decodeFrame([sent[0]], key, ivMask).plain).toEqual(au);
       expect(decodeFrame([sent[1]], key, ivMask).plain).toEqual(au);
+    } finally {
+      sender.close();
+      listener.close();
+    }
+  });
+
+  it('retransmits the exact missing packet requested by Cast feedback', async () => {
+    const { sender, listener, sent: raw } = await harness();
+    try {
+      const au = Buffer.alloc(3000, 0x5a);
+      sender.sendVideoFrame(au, true);
+      await new Promise((r) => setTimeout(r, 120));
+      const original = raw.filter(isVideoPacket);
+      expect(original.length).toBe(3);
+
+      const feedback = Buffer.alloc(24);
+      feedback[0] = 0x8f; // V=2, FMT=15 (Cast feedback)
+      feedback[1] = 206;
+      feedback.writeUInt16BE(5, 2); // 24 bytes total
+      feedback.writeUInt32BE(0x12345678, 4); // receiver SSRC
+      feedback.writeUInt32BE((sender as any).videoSsrc, 8);
+      feedback.write('CAST', 12, 'ascii');
+      feedback[16] = 0; // checkpoint / feedback frame ID
+      feedback[17] = 1; // one loss field
+      feedback.writeUInt16BE(400, 18); // target playout delay
+      feedback[20] = 0; // missing frame 0
+      feedback.writeUInt16BE(1, 21); // missing packet 1
+      feedback[23] = 0;
+
+      // Hisense sends feedback as a compound RTCP datagram with an XR packet first.
+      const extendedReport = Buffer.alloc(20);
+      extendedReport[0] = 0x80;
+      extendedReport[1] = 207;
+      extendedReport.writeUInt16BE(4, 2);
+      const senderPort = ((sender as any).socket.address() as any).port;
+      listener.send(Buffer.concat([extendedReport, feedback]), senderPort, '127.0.0.1');
+      await new Promise((r) => setTimeout(r, 100));
+
+      const after = raw.filter(isVideoPacket);
+      expect(after.length).toBe(4);
+      const retransmit = after[3];
+      expect(retransmit.readUInt16BE(14)).toBe(1);
+      expect(retransmit[13]).toBe(0);
+      expect(retransmit.readUInt16BE(2)).not.toBe(original[1].readUInt16BE(2));
+      expect(retransmit.subarray(19)).toEqual(original[1].subarray(19));
     } finally {
       sender.close();
       listener.close();

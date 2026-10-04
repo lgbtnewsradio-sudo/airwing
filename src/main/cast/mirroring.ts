@@ -21,8 +21,7 @@
  * send, not from capture timestamps or a fixed per-frame increment, so the RTP clock can't
  * drift out of sync with real time no matter how irregular VP8 encoder output timing is
  * upstream — and the queue sheds toward the newest frame under any backlog instead of
- * growing, since this stream has no retransmission and an unbounded queue is itself
- * indistinguishable from added lag once it's deep enough.
+ * growing. Cast feedback repairs missing fragments from a bounded recent-frame cache.
  *
  * Protocol reverse-engineered from Google's own open-sourced reference implementation
  * (github.com/google/openscreen, cast/streaming/*) — the same wire format Chrome speaks,
@@ -61,12 +60,28 @@ const RTCP_SR_INTERVAL_MS = 1000;
 const RTCP_PT_SENDER_REPORT = 200;
 /** RFC 3550 RTCP packet type for a Receiver Report — what comes back on this socket. */
 const RTCP_PT_RECEIVER_REPORT = 201;
+/** RFC 4585 payload-specific feedback. Cast uses FMT=15 for ACK/NACK feedback and FMT=1
+ * for picture-loss indication. */
+const RTCP_PT_PAYLOAD_SPECIFIC = 206;
+const RTCP_FMT_PICTURE_LOSS = 1;
+const RTCP_FMT_CAST_FEEDBACK = 15;
+const RTCP_CAST_IDENTIFIER = 0x43415354; // "CAST"
+const RTCP_ALL_PACKETS_LOST = 0xffff;
 /** Above this fraction lost (RFC 3550 §6.4.2, an 8-bit fixed-point fraction), treat the queue
  *  as carrying frames the receiver is unlikely to want and drop toward the newest one. */
 const RTCP_LOSS_DROP_THRESHOLD = 0.05;
 /** Throttle for the periodic diagnostic log lines below — frequent enough to see a trend
  *  forming within a few seconds, infrequent enough not to flood the log file. */
 const DIAG_LOG_INTERVAL_MS = 2000;
+/** Frame IDs are only eight bits on the wire. Keep less than one full wrap so a feedback
+ * frame ID always maps unambiguously to one cached frame. */
+const MAX_RETRANSMIT_FRAMES = 240;
+
+interface SentFrame {
+  frameId: number;
+  packets: Buffer[];
+  lastSentAtMs: number[];
+}
 
 /** aesKey/aesIvMask are lowercase hex in the wire format, not base64 — confirmed against a
  *  real captured Chrome OFFER. Sending base64 there is why the first live attempt against
@@ -142,7 +157,13 @@ export class MirroringSender extends EventEmitter {
   private readonly videoKey = randomBytes(16);
   private readonly videoIvMask = randomBytes(16);
   private seqCounter = Math.floor(Math.random() * 0x10000);
-  private frameCounter = 0;
+  /** Cast FrameId::first() is zero; 0xff is the virtual pre-stream leader. */
+  private frameCounter = -1;
+  /** Local-only identity used while frames wait in the pacing queue. Wire FrameIds are assigned
+   * only on dispatch so a frame dropped before sending cannot create a protocol-visible gap. */
+  private queuedFrameCounter = -1;
+  private sentFirstKeyFrame = false;
+  private readonly sentFrames = new Map<number, SentFrame>();
   private firstFrameDispatched = false;
   private packetsSent = 0;
   private octetsSent = 0;
@@ -152,6 +173,8 @@ export class MirroringSender extends EventEmitter {
   private lastQueueLogAtMs = 0;
   private lastClockLogAtMs = 0;
   private lastRtcpLogAtMs = 0;
+  private feedbackRequested = 0;
+  private feedbackRetransmitted = 0;
   private closed = false;
 
   constructor(
@@ -232,33 +255,41 @@ export class MirroringSender extends EventEmitter {
    *  on the queue's own wall-clock tick, not synchronously here. */
   sendVideoFrame(vp8: Uint8Array, isKeyFrame: boolean): void {
     if (!this.pacing || this.closed) return;
-    this.frameCounter++;
-    const frameId = this.frameCounter;
-    // Per encoded_frame.h: "if this frame does not require any other frame in order to
-    // become decodable (e.g., key frames), referenced_frame_id must equal frame_id." A delta
-    // frame here always depends on the one immediately before it (simple linear GOP, no SVC).
-    const referencedFrameId = isKeyFrame ? frameId : frameId - 1;
-    this.pacing.enqueue({ data: vp8, keyFrame: isKeyFrame, frameId, referencedFrameId });
+    // A stream must begin with a decodable frame 0. Dropping pre-keyframe deltas prevents the
+    // receiver from beginning the session with a permanently missing dependency.
+    if (!this.sentFirstKeyFrame && !isKeyFrame) return;
+    if (isKeyFrame) this.sentFirstKeyFrame = true;
+    const queuedFrameId = ++this.queuedFrameCounter;
+    this.pacing.enqueue({ data: vp8, keyFrame: isKeyFrame, frameId: queuedFrameId, referencedFrameId: queuedFrameId });
   }
 
   /** Called by the pacing queue at send time with the wall-clock-derived RTP timestamp for
    *  this tick; this is the only place packets actually go out on the wire. */
   private dispatchFrame(frame: RtpQueuedFrame, rtpTimestamp: number): void {
     if (!this.socket || this.closed) return;
-    const encrypted = this.encryptFrame(Buffer.from(frame.data), frame.frameId);
+    const frameId = ++this.frameCounter;
+    // Per encoded_frame.h: keyframes self-reference; each delta depends on the immediately
+    // preceding frame that was actually sent. Assigning this here guarantees no wire gaps.
+    const referencedFrameId = frame.keyFrame ? frameId : frameId - 1;
+    const encrypted = this.encryptFrame(Buffer.from(frame.data), frameId);
     const packets = this.packetize(encrypted, {
       keyFrame: frame.keyFrame,
-      frameId: frame.frameId,
-      referencedFrameId: frame.referencedFrameId,
+      frameId,
+      referencedFrameId,
       rtpTimestamp,
     });
-    for (const packet of packets) {
-      this.socket.send(packet, this.remotePort, this.host, (err) => {
-        if (err) log.debug(this.scope, `send error: ${err.message}`);
-      });
-      this.packetsSent++;
-      this.octetsSent += packet.length - RTP_HEADER_SIZE; // RFC 3550: payload octets only
+    const sentFrame: SentFrame = {
+      frameId,
+      packets: packets.map((packet) => Buffer.from(packet)),
+      lastSentAtMs: new Array(packets.length).fill(performance.now()),
+    };
+    this.sentFrames.set(frameId & 0xff, sentFrame);
+    while (this.sentFrames.size > MAX_RETRANSMIT_FRAMES) {
+      const oldest = this.sentFrames.keys().next().value as number | undefined;
+      if (oldest === undefined) break;
+      this.sentFrames.delete(oldest);
     }
+    for (const packet of packets) this.sendPacket(packet);
     this.logClockSample(rtpTimestamp);
     // Start RTCP after the first frame's own packets so its Sender Report already reflects
     // real, non-zero counts rather than reporting zero for the "as of now" cumulative fields.
@@ -266,6 +297,15 @@ export class MirroringSender extends EventEmitter {
       this.firstFrameDispatched = true;
       this.startRtcp();
     }
+  }
+
+  private sendPacket(packet: Buffer): void {
+    if (!this.socket || this.closed) return;
+    this.socket.send(packet, this.remotePort, this.host, (err) => {
+      if (err) log.debug(this.scope, `send error: ${err.message}`);
+    });
+    this.packetsSent++;
+    this.octetsSent += Math.max(0, packet.length - RTP_HEADER_SIZE);
   }
 
   private onQueueSample(depth: number, oldestAgeMs: number): void {
@@ -333,10 +373,26 @@ export class MirroringSender extends EventEmitter {
    * once loss is real. All three are also logged, throttled, for offline analysis.
    */
   private handleIncomingRtcp(msg: Buffer): void {
-    if (msg.length < 8 + 24) return;
-    if (msg[1] !== RTCP_PT_RECEIVER_REPORT) return;
-    if ((msg[0] & 0x1f) < 1) return; // report count: need at least one report block
-    const block = msg.subarray(8, 8 + 24);
+    let offset = 0;
+    while (offset + 4 <= msg.length) {
+      const first = msg[offset];
+      const packetType = msg[offset + 1];
+      const packetLength = (msg.readUInt16BE(offset + 2) + 1) * 4;
+      if ((first >>> 6) !== 2 || packetLength < 4 || offset + packetLength > msg.length) return;
+      const packet = msg.subarray(offset, offset + packetLength);
+      if (packetType === RTCP_PT_RECEIVER_REPORT) this.handleReceiverReport(packet);
+      else if (packetType === RTCP_PT_PAYLOAD_SPECIFIC) {
+        const format = first & 0x1f;
+        if (format === RTCP_FMT_CAST_FEEDBACK) this.handleCastFeedback(packet);
+        else if (format === RTCP_FMT_PICTURE_LOSS) this.handlePictureLoss(packet);
+      }
+      offset += packetLength;
+    }
+  }
+
+  private handleReceiverReport(packet: Buffer): void {
+    if (packet.length < 32 || (packet[0] & 0x1f) < 1) return;
+    const block = packet.subarray(8, 32);
     const fractionLost = block[4] / 256;
     const jitterTicks = block.readUInt32BE(12);
     const jitterMs = (jitterTicks / VIDEO_TIME_BASE_HZ) * 1000;
@@ -353,11 +409,69 @@ export class MirroringSender extends EventEmitter {
     }
     if (fractionLost > RTCP_LOSS_DROP_THRESHOLD) this.pacing?.dropToNewest();
     const now = performance.now();
+    if (now - this.lastRtcpLogAtMs < DIAG_LOG_INTERVAL_MS) return;
+    this.lastRtcpLogAtMs = now;
+    const rttLabel = rttMs !== null ? `${rttMs.toFixed(1)}ms` : 'unknown';
+    log.info(this.scope, `[rtcprr] jitter=${jitterMs.toFixed(1)}ms rtt=${rttLabel} loss=${(fractionLost * 100).toFixed(1)}%`);
+  }
+
+  /** Parse the Cast FMT=15 feedback block and retransmit exactly the missing fragments. */
+  private handleCastFeedback(packet: Buffer): void {
+    // RTCP header + receiver SSRC + sender SSRC + "CAST" + feedback header.
+    if (packet.length < 20 || packet.readUInt32BE(12) !== RTCP_CAST_IDENTIFIER) return;
+    if (packet.readUInt32BE(8) !== this.videoSsrc) return;
+    const checkpoint = packet[16];
+    const lossFieldCount = packet[17];
+    const targetDelayMs = packet.readUInt16BE(18);
+    if (packet.length < 20 + lossFieldCount * 4) return;
+    let requested = 0;
+    let retransmitted = 0;
+    let cursor = 20;
+    for (let i = 0; i < lossFieldCount; i++, cursor += 4) {
+      const frameId = packet[cursor];
+      const packetId = packet.readUInt16BE(cursor + 1);
+      const followingMask = packet[cursor + 3];
+      const ids: number[] = [];
+      const cached = this.sentFrames.get(frameId);
+      if (packetId === RTCP_ALL_PACKETS_LOST) {
+        if (cached) for (let id = 0; id < cached.packets.length; id++) ids.push(id);
+      } else {
+        ids.push(packetId);
+        for (let bit = 0; bit < 8; bit++) if (followingMask & (1 << bit)) ids.push(packetId + bit + 1);
+      }
+      requested += ids.length || 1;
+      if (!cached || (cached.frameId & 0xff) !== frameId) continue;
+      for (const id of ids) {
+        const original = cached.packets[id];
+        if (!original) continue;
+        const now = performance.now();
+        if (now - cached.lastSentAtMs[id] < 5) continue;
+        const resent = Buffer.from(original);
+        resent.writeUInt16BE(this.seqCounter & 0xffff, 2);
+        this.seqCounter++;
+        cached.lastSentAtMs[id] = now;
+        this.sendPacket(resent);
+        retransmitted++;
+      }
+    }
+    this.feedbackRequested += requested;
+    this.feedbackRetransmitted += retransmitted;
+    const now = performance.now();
     if (now - this.lastRtcpLogAtMs >= DIAG_LOG_INTERVAL_MS) {
       this.lastRtcpLogAtMs = now;
-      const rttLabel = rttMs !== null ? `${rttMs.toFixed(1)}ms` : 'unknown';
-      log.info(this.scope, `[rtcprr] jitter=${jitterMs.toFixed(1)}ms rtt=${rttLabel} loss=${(fractionLost * 100).toFixed(1)}%`);
+      log.info(
+        this.scope,
+        `[castfb] checkpoint=${checkpoint} targetDelay=${targetDelayMs}ms requested=${this.feedbackRequested} retransmitted=${this.feedbackRetransmitted}`,
+      );
+      this.feedbackRequested = 0;
+      this.feedbackRetransmitted = 0;
     }
+  }
+
+  private handlePictureLoss(packet: Buffer): void {
+    if (packet.length < 12 || packet.readUInt32BE(8) !== this.videoSsrc) return;
+    log.info(this.scope, '[castfb] picture loss indicated; requesting a keyframe');
+    this.emit('keyframe-needed');
   }
 
   /** AES-128-CTR over the whole frame as one continuous keystream (matches libcast). */
@@ -402,6 +516,7 @@ export class MirroringSender extends EventEmitter {
     this.rtcpTimer = null;
     this.pacing?.stop();
     this.pacing = null;
+    this.sentFrames.clear();
     try {
       this.socket?.close();
     } catch {

@@ -115,9 +115,8 @@ export class CapturePipeline {
   /** Actual VP8 encode dimensions, capped independently of the primary H.264 target. */
   private vp8Width = 0;
   private vp8Height = 0;
-  /** VP8 delta frames chain off the previous frame with no built-in recovery on loss (no
-   *  retransmission is implemented for Cast Streaming yet), so a single dropped packet would
-   *  otherwise freeze the picture forever. Re-keying periodically bounds that to one interval. */
+  /** VP8 delta frames chain off the previous frame. Periodic keyframes bound recovery time for
+   *  losses that cannot be repaired from the sender's recent-frame retransmission cache. */
   private readonly castMirrorGopUs = 2_000_000;
   /**
    * Diagnostic only: how long each frame spends inside the VP8 encoder (encode() call to

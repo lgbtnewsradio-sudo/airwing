@@ -24,7 +24,8 @@ const RESYNC_THRESHOLD_MS = FRAME_INTERVAL_MS * 4;
  * sync with real time regardless of how irregular production is upstream. The queue is bounded
  * by both count and age: under any backlog it sheds toward the newest frame rather than
  * growing, since an unbounded queue is itself indistinguishable from added lag once it's deep
- * enough, and this stream has no retransmission, so a stale frame is worth less than a fresh one.
+ * enough. A stale unsent frame is worth less than a fresh one even though already-sent frames
+ * can now be repaired from the retransmission cache.
  */
 export class RtpPacingQueue {
   private readonly queue: RtpQueuedFrame[] = [];

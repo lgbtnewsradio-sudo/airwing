@@ -703,8 +703,9 @@ button.ghost {
 
 .log-line {
   display: grid;
-  grid-template-columns: 62px 70px 1fr;
+  grid-template-columns: 62px 70px minmax(0, 1fr);
   gap: 6px;
+  align-items: start;
   padding: 1px 0;
 }
 
@@ -715,6 +716,14 @@ button.ghost {
 
 .log-line .scope {
   color: var(--accent);
+}
+
+.log-line .scope,
+.log-line .msg {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .log-line.warn .msg {
