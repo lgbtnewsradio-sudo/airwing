@@ -2,6 +2,16 @@
 
 Wireless screen mirroring and media streaming for Windows. Share your desktop, selected windows, media and supported system audio with compatible AirPlay, Google Cast and browser receivers.
 
+## Your screen. A bigger stage.
+
+Take your ideas beyond your desktop. Choose what to share, connect a compatible receiver, and bring your presentation or media to the big screen.
+
+[Explore AirWing](https://lgbtnewsradio-sudo.github.io/airwing/) · [Microsoft Store listing](https://apps.microsoft.com/detail/9N3FMGF9168) · [Privacy policy](https://lgbtnewsradio-sudo.github.io/airwing/privacy.html)
+
+![AirWing v1.2 source and receiver selection](site/assets/app-overview.png)
+
+*Actual app interface with sample device names. Store availability is subject to Microsoft review.*
+
 ## Features
 
 - Mirror a display, application window or selected region.
