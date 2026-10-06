@@ -12,6 +12,7 @@
  */
 
 import { Fmp4Muxer, avcCodecString, type FragmentInfo } from '@shared/fmp4';
+import { AirPlayPcmFramer } from '@shared/airplayPcm';
 import type { CastEncoderInfo, EncoderInfo, StreamConfig, StreamMeta } from '@shared/types';
 
 export interface PipelineEvents {
@@ -100,6 +101,8 @@ export class CapturePipeline {
   private canvasRequired = false;
   /** AirPlay screen-mirroring tap: emit raw avcC access units for the mirror transport. */
   private mirrorTap = false;
+  private airplayPcm = new AirPlayPcmFramer();
+  onRawAudioAirPlay: ((pcm: Uint8Array, capturedAtMs: number) => void) | null = null;
   private mirrorConfigSent = false;
   onRawVideo: ((au: Uint8Array, keyframe: boolean, config?: Uint8Array) => void) | null = null;
   /**
@@ -530,7 +533,7 @@ export class CapturePipeline {
         data.close();
         continue;
       }
-      if (encoder.encodeQueueSize > 8) {
+      if (encoder.encodeQueueSize > 8 && !this.mirrorTap) {
         data.close();
         continue;
       }
@@ -563,9 +566,15 @@ export class CapturePipeline {
         }
       }
       data.close();
+      if (this.mirrorTap && this.onRawAudioAirPlay) {
+        const capturedAtMs = Date.now() - (this.nowUs() - timestamp) / 1000;
+        for (const frame of this.airplayPcm.push(planar, frames, channels, sr, capturedAtMs)) {
+          this.onRawAudioAirPlay(frame.pcm, frame.capturedAtMs);
+        }
+      }
       const restamped = new AudioData({ format: 'f32-planar', sampleRate: sr, numberOfFrames: frames, numberOfChannels: channels, timestamp, data: planar });
       if (this.castAudioEncoder?.state === 'configured' && this.castAudioEncoder.encodeQueueSize <= 2 && sr === 48000 && channels === this.audioChannels) this.castAudioEncoder.encode(restamped);
-      encoder.encode(restamped);
+      if (encoder.encodeQueueSize <= 8) encoder.encode(restamped);
       restamped.close();
     }
   }
@@ -676,6 +685,7 @@ export class CapturePipeline {
   setMirrorTap(active: boolean): void {
     if (this.mirrorTap === active) return;
     this.mirrorTap = active;
+    this.airplayPcm.reset();
     if (active) {
       this.mirrorConfigSent = false;
       this.keyframeRequested = true; // the receiver needs an IDR + avcC to start decoding
@@ -847,6 +857,7 @@ export class CapturePipeline {
     this.stopping = true;
     const wasRunning = this.running;
     this.running = false;
+    this.airplayPcm.reset();
     if (this.pacer) clearInterval(this.pacer);
     this.pacer = null;
     if (this.muxerTimer) clearTimeout(this.muxerTimer);

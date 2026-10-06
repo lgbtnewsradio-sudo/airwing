@@ -221,6 +221,7 @@ export const IPC = {
   captureStatus: 'capture:status',
   captureCommand: 'capture:command',
   mirrorFrame: 'mirror:frame',
+  mirrorAudio: 'mirror:audio',
   mirrorTap: 'mirror:tap',
   castMirrorFrame: 'castMirror:frame',
   castMirrorTap: 'castMirror:tap',

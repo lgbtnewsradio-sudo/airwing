@@ -13,6 +13,8 @@ from prior reverse-engineering published under the GPL:
 
   - doubletake (https://github.com/omarroth/doubletake), GPL-3.0, an AirPlay
     mirroring sender for Linux.
+    AirWing's ALAC audio framing, encrypted audio packets and PTP audio time
+    announcements also follow that project's sender implementation.
   - UxPlay (https://github.com/FDH2/UxPlay), GPL-3.0, and the playfair lineage
     (RPiPlay, shairport) it builds on.
 

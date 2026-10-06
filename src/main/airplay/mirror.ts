@@ -11,7 +11,7 @@
  *
  * Sequence for a modern (encrypted, PTP) receiver:
  *   pair-verify (caller) -> POST /fp-setup m1/m3, if supported -> control SETUP (anchors PTP
- *   clock) -> RECORD -> audio SETUP (type 96 descriptor, no packets in video-only mode)
+ *   clock) -> RECORD -> audio SETUP (type 96 ALAC audio, optional packets)
  *   -> video SETUP (type 110) -> connect TCP data port -> stream codec + video frames.
  *
  * This is a faithful TypeScript port of the GPL-3.0 doubletake project's MirrorSession for
@@ -31,6 +31,7 @@ import { newFPSAPSession, byteSource } from './fairplay';
 import { aeadEncrypt } from './chacha20poly1305';
 import { HapFramer, randomId } from './crypto';
 import { log } from '../logger';
+import { AirPlayAudioSender, AIRPLAY_AUDIO_LATENCY } from './audio';
 
 const BPLIST = 'application/x-apple-binary-plist';
 /** SourceVersion that selects the modern (ChaCha) receiver behaviour. */
@@ -282,9 +283,13 @@ class MediaClock {
   }
 
   now(biasMs: number): bigint | null {
+    return this.at(Date.now(), biasMs);
+  }
+
+  at(wallMs: number, biasMs = 0): bigint | null {
     if (this.anchorLocalMs === 0 || this.timelineID === 0n) return null;
-    const elapsed = Date.now() - this.anchorLocalMs + biasMs;
-    return (this.anchorTimestamp + compactTimestamp(elapsed)) & 0xffffffffffffffffn;
+    const elapsed = wallMs - this.anchorLocalMs + biasMs;
+    return (this.anchorTimestamp + BigInt(Math.round(elapsed * 0x100000000 / 1000))) & 0xffffffffffffffffn;
   }
 }
 
@@ -299,6 +304,7 @@ export interface MirrorOptions {
   keys: SessionKeys;
   /** Receiver /info dictionary. */
   info: Record<string, any> | null;
+  audioEnabled?: boolean;
 }
 
 /**
@@ -316,6 +322,7 @@ export class MirrorClient extends EventEmitter {
   private readonly dacpId = randomBytes(8).toString('hex').toUpperCase();
   private readonly activeRemote = randomBytes(4).readUInt32BE(0);
   private audioURI = '';
+  private audio: AirPlayAudioSender | null = null;
   private videoConnId = 0;
   private chachaKey: Buffer | null = null;
   private chachaCounter = 0n;
@@ -379,9 +386,25 @@ export class MirrorClient extends EventEmitter {
       if (rec.code !== 200) log.warn(this.scope, `RECORD -> ${rec.code} (continuing)`);
     }
 
-    // 3) Audio SETUP (type 96). The descriptor must exist for the receiver to reach ready
-    //    state even though this video-only session sends no audio packets.
-    const audioChaChaKey = randomBytes(32);
+    // 3) The audio descriptor is needed for readiness even when capture audio is disabled.
+    let audioControlPort = 0;
+    if (this.opts.audioEnabled) {
+      const sender = new AirPlayAudioSender(this.opts.host, (wallMs) => {
+        const time = this.clock.at(wallMs);
+        return time === null ? null : { time, timeline: this.clock.timelineID };
+      }, (error) => {
+        log.warn(this.scope, `audio disabled: ${error.message}`);
+        this.audio?.close();
+        this.audio = null;
+      });
+      this.audio = sender;
+      try { audioControlPort = await sender.bind(); }
+      catch (error) {
+        sender.close(); this.audio = null;
+        log.warn(this.scope, `audio socket setup failed: ${(error as Error).message}; continuing video-only`);
+      }
+    }
+    const audioChaChaKey = this.audio?.key ?? randomBytes(32);
     const audioStream: Record<string, unknown> = {
       type: 96,
       streamConnectionID: audioConnId,
@@ -392,17 +415,29 @@ export class MirrorClient extends EventEmitter {
       audioMode: 'default',
       usingScreen: true,
       latencyMin: 0,
-      latencyMax: 88200,
+      latencyMax: this.audio ? AIRPLAY_AUDIO_LATENCY : 88200,
       isMedia: false,
       supportsDynamicStreamID: true,
       shk: audioChaChaKey,
       streamConnections: {
         streamConnectionTypeRTP: { streamConnectionKeyUseStreamEncryptionKey: true },
-        streamConnectionTypeRTCP: { streamConnectionKeyPort: 0 },
+        streamConnectionTypeRTCP: { streamConnectionKeyPort: audioControlPort },
       },
     };
     const aresp = await this.rtsp('SETUP', this.audioURI, toPlist({ streams: [audioStream] }));
     if (aresp.code !== 200) log.warn(this.scope, `audio SETUP -> ${aresp.code} (continuing video-only)`);
+    const audioResponse = fromPlist(aresp.body);
+    const negotiated = (audioResponse?.streams as Record<string, any>[] | undefined)?.find((stream) => plistInt(stream.type) === 96);
+    const connections = negotiated?.streamConnections;
+    const audioDataPort = plistInt(connections?.streamConnectionTypeRTP?.streamConnectionKeyPort) || plistInt(negotiated?.dataPort);
+    const audioRemoteControlPort = plistInt(connections?.streamConnectionTypeRTCP?.streamConnectionKeyPort) || plistInt(negotiated?.controlPort);
+    if (this.audio && aresp.code === 200 && audioDataPort > 0 && audioDataPort <= 65535 && audioRemoteControlPort > 0 && audioRemoteControlPort <= 65535) {
+      this.audio.connect(audioDataPort, audioRemoteControlPort);
+      log.info(this.scope, 'ALAC audio transport ready (44.1 kHz stereo)');
+    } else {
+      this.audio?.close(); this.audio = null;
+      if (this.opts.audioEnabled) log.warn(this.scope, 'audio transport unavailable; continuing video-only');
+    }
 
     // 4) Video SETUP (type 110). shk/shiv carry the FairPlay stream key material.
     this.videoConnId = newStreamConnectionID();
@@ -435,12 +470,13 @@ export class MirrorClient extends EventEmitter {
     await this.connectData(dataPort);
 
     // 7) Volume to 0 dB (full scale), twice, as real senders do.
-    const vol = Buffer.from('volume: 0.000000\r\n');
-    await this.rtsp('SET_PARAMETER', this.audioURI, vol, 'text/parameters').catch(() => undefined);
-    await this.rtsp('SET_PARAMETER', this.audioURI, vol, 'text/parameters').catch(() => undefined);
+    if (this.audio) {
+      const vol = Buffer.from('volume: -12.000000\r\n');
+      await this.rtsp('SET_PARAMETER', this.audioURI, vol, 'text/parameters').catch(() => undefined);
+    }
 
     this.startFeedback();
-    log.info(this.scope, 'mirror session established (video-only)');
+    log.info(this.scope, `mirror session established (${this.audio ? 'video + ALAC audio' : 'video-only'})`);
   }
 
   /** POST /fp-setup m1/m3, then wrap a random key and derive the stream master key. */
@@ -626,6 +662,17 @@ export class MirrorClient extends EventEmitter {
     }
   }
 
+  sendAudioFrame(pcm: Uint8Array, capturedAtMs: number): void {
+    if (!this.closed && this.firstFrameSent) this.audio?.enqueue(pcm, capturedAtMs);
+  }
+
+  async setVolume(volume: number): Promise<void> {
+    if (!this.audio || this.closed || !Number.isFinite(volume)) return;
+    const level = Math.max(0, Math.min(1, volume));
+    const db = level === 0 ? -144 : -30 + level * 30;
+    await this.rtsp('SET_PARAMETER', this.audioURI, Buffer.from(`volume: ${db.toFixed(6)}\r\n`), 'text/parameters');
+  }
+
   /** anchor + elapsed + bias, clamped monotonic. */
   private frameTimestamp(): bigint {
     let ts = this.clock.now(VIDEO_BIAS_MS) ?? 0n;
@@ -723,6 +770,7 @@ export class MirrorClient extends EventEmitter {
 
   close(): void {
     this.closed = true;
+    this.audio?.close(); this.audio = null;
     if (this.feedbackTimer) clearInterval(this.feedbackTimer);
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
     this.feedbackTimer = null;

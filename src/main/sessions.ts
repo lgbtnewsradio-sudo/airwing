@@ -516,6 +516,7 @@ export class SessionManager extends EventEmitter {
       conn,
       keys,
       info: client.info,
+      audioEnabled: Boolean(this.opts.hub.meta?.encoder.audioCodec),
     });
     session.mirror = mirror;
     mirror.on('error', (err: Error) => {
@@ -546,6 +547,10 @@ export class SessionManager extends EventEmitter {
       if (config) m.setCodecConfig(config);
       m.sendAccessUnit(au, keyframe);
     }
+  }
+
+  pushMirrorAudio(pcm: Uint8Array, capturedAtMs: number): void {
+    for (const mirror of this.mirrorClients.values()) mirror.sendAudioFrame(pcm, capturedAtMs);
   }
 
   /** Begin PIN pairing with an AirPlay receiver (shows a code on its screen). */
@@ -605,6 +610,12 @@ export class SessionManager extends EventEmitter {
   async mediaControl(deviceId: string, action: MediaControlAction): Promise<void> {
     const session = this.sessions.get(deviceId);
     if (!session) throw new Error('no session for device');
+    if (session.mirror) {
+      if (action.type === 'volume') { session.info.volume = action.volume; return session.mirror.setVolume(action.volume); }
+      if (action.type === 'mute') return session.mirror.setVolume(action.muted ? 0 : session.info.volume ?? 0.6);
+      if (action.type === 'stop') return this.disconnect(deviceId, 'stopped');
+      return;
+    }
     if (session.cast) {
       const c = session.cast;
       switch (action.type) {

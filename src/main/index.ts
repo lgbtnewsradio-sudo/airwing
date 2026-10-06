@@ -19,6 +19,7 @@ import { join } from 'node:path';
 import { existsSync, readFileSync, promises as fs } from 'node:fs';
 import { sanitizeDiagnostics, redactText } from '@shared/privacy';
 import { configureFirewall } from './firewall';
+import { compactWindowBounds } from './windowPlacement';
 import { execFile } from 'node:child_process';
 import {
   IPC,
@@ -120,11 +121,11 @@ function iconPath(name: string): string {
 // --------------------------------------------------------------------------- window
 
 function createWindow(): BrowserWindow {
+  const bounds = compactWindowBounds(screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea);
   const win = new BrowserWindow({
-    width: 560,
-    height: 720,
-    minWidth: 420,
-    minHeight: 520,
+    ...bounds,
+    minWidth: Math.min(320, bounds.width),
+    minHeight: Math.min(420, bounds.height),
     show: false,
     title: 'AirWing',
     backgroundColor: '#0f1219',
@@ -491,6 +492,9 @@ function registerIpc(): void {
     const auBuf = au instanceof Uint8Array ? au : new Uint8Array(au);
     const cfgBuf = config ? (config instanceof Uint8Array ? config : new Uint8Array(config)) : undefined;
     sessions.pushMirrorFrame(auBuf, keyframe, cfgBuf);
+  });
+  ipcMain.on(IPC.mirrorAudio, (_e, pcm: ArrayBuffer | Uint8Array, capturedAtMs: number) => {
+    sessions.pushMirrorAudio(pcm instanceof Uint8Array ? pcm : new Uint8Array(pcm), capturedAtMs);
   });
   ipcMain.on(IPC.castMirrorFrame, (_e, chunk: ArrayBuffer | Uint8Array, keyframe: boolean, timestampUs: number, width: number, height: number) => {
     const buf = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);

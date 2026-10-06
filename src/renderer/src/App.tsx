@@ -59,6 +59,7 @@ export function App() {
         );
         // AirPlay screen-mirroring tap: forward raw avcC access units to the mirror transport.
         p.onRawVideo = (au, keyframe, cfg) => api.capture.sendMirrorFrame(au, keyframe, cfg);
+        p.onRawAudioAirPlay = (pcm, capturedAtMs) => api.capture.sendMirrorAudio(pcm, capturedAtMs);
         // Google Cast low-latency (Cast Streaming / VP8) tap.
         p.onRawVideoVp8 = (chunk, keyframe, ts, w, h) => api.capture.sendCastMirrorFrame(chunk, keyframe, ts, w, h);
         p.onCastMirrorUnavailable = () => api.capture.sendCastMirrorUnavailable();

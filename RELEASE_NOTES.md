@@ -1,3 +1,21 @@
+## AirWing 1.2.1
+
+- Experimental audio for AirPlay screen mirroring: captured system sound is
+  resampled to stereo 44.1 kHz and sent as encrypted ALAC alongside video.
+- Capture audio is controlled by the existing Include audio setting. Volume and
+  mute controls now also apply to AirPlay mirroring. Initial stream volume is
+  -12 dB rather than forcing the receiver to full volume.
+- Audio packets use the video session's clock, bounded buffering and retransmit
+  handling. Audio setup failures keep video mirroring usable.
+- The main window is now 375 pixels wide, approximately one-third narrower, and
+  opens near the right edge of the display containing the pointer. It respects
+  the taskbar's usable work area and remains movable and resizable.
+
+Local verification covers PCM conversion, ALAC frame structure, authenticated
+packet encryption, UDP transmission/retransmission, audio setup fallback, window
+placement and compact layout. Physical Apple TV audio playback and synchronization
+still need validation; this release does not claim hardware-confirmed audio.
+
 ## AirWing 1.0.6
 
 **Apple TV now tells you the truth in a tenth of a second, instead of spinning for twelve.**

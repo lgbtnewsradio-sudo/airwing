@@ -16,6 +16,7 @@ Take your ideas beyond your desktop. Choose what to share, connect a compatible 
 
 - Mirror a display, application window or selected region.
 - Apple TV screen mirroring with the AirPlay mirroring transport and pairing when required.
+- Experimental AirPlay system audio in v1.2.1, plus a compact window that opens on the right side of your screen.
 - Realtime Google Cast mirroring: VP8, encrypted RTP, bounded pacing and packet repair. Opus system audio is available when the encoder and receiver accept it.
 - Lowest delay, Balanced and Best picture presets, plus optional automatic Cast bitrate reduction under loss and gradual recovery.
 - Browser playback, phone remote, direct media playback, favorites, tray controls and hotkeys.
@@ -28,7 +29,7 @@ Cast uses separate VP8/Opus encoders alongside the H.264/AAC path. Simultaneous 
 
 | Receiver | Evidence | Notes |
 | --- | --- | --- |
-| Apple TV 4K | User confirmed working with 1.1.9 | Mirroring currently sends video only. |
+| Apple TV 4K | Video confirmed working with 1.1.9 | 1.2.1 adds experimental ALAC mirroring audio; physical-device audio validation is pending. |
 | Hisense Android TV projector | User confirmed the 1.1.10 lag/glitch fix works | New 1.2.0 audio and adaptive quality still need physical-device verification. |
 | Sony Bravia Cast | Earlier negotiation/video tests | Not confirmation of the newest release. |
 | Other Cast/AirPlay devices | Protocol/mock tests; compatibility varies | Report model, software version and support bundle. |
@@ -41,8 +42,13 @@ Realtime Cast may fall back to buffered HLS when mirroring negotiation is unsupp
 1. Select a source in From. The default display may start capture automatically. The title bar shows capture activity; Stop or Quit ends it.
 2. Select a destination in To. Enter an on-screen pairing code if requested. Click again to disconnect.
 3. Choose quality and Cast audio in Settings before the next capture. Audio requires an available system-audio track; current Cast audio requires 48 kHz input. Unsupported configurations remain video-only and are labeled accordingly.
+
 4. For browser viewing, open the displayed local URL. Enable access codes on shared networks. HTTP/browser playback is not encrypted; do not expose the server to the internet.
 5. Closing the window keeps AirWing in the tray. Use Stop mirroring or Quit to end capture.
+
+AirPlay mirroring audio in 1.2.1 uses the source's “Include audio” setting and converts captured sound to stereo 44.1 kHz ALAC. Unsupported audio setup leaves video mirroring running. The initial AirPlay stream volume is -12 dB; volume and mute controls are available during mirroring. Audio interoperability still needs testing on physical receivers.
+
+The main window opens 375 pixels wide near the right edge of the display containing the pointer, within the usable desktop area. It remains movable and resizable.
 
 Default shortcuts: Ctrl+Shift+M start/stop, Ctrl+Shift+P pause/resume, Ctrl+Shift+X stop everything.
 
@@ -73,7 +79,11 @@ npm run dist
 
 Installer and ZIP output goes to release. Store packaging is separate: npm run store:check and npm run dist:store require your real Partner Center identity. Source tests do not establish certification.
 
-Get published releases at https://github.com/lgbtnewsradio-sudo/airwing/releases. New local builds may precede a public release.
+## Get AirWing
+
+Get the packaged app through the [Microsoft Store listing](https://apps.microsoft.com/detail/9N3FMGF9168). Availability and updates are subject to Microsoft review. Free installer and portable downloads are no longer distributed through GitHub releases.
+
+This repository and its version tags provide the corresponding GPL source for distributed versions; they are not a Store purchase or a packaged-app download.
 
 ## Limitations
 
