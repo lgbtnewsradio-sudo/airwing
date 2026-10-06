@@ -15,8 +15,7 @@ export function ReceiverPanel({ info, settings, onSettings, stats }: Props) {
         <h2>Browser receiver &amp; phone remote</h2>
       </div>
       <p className="hint">
-        Any device with a modern browser — a smart TV, another PC, a tablet, a conference room display — can receive your screen with about one frame of latency. No app install
-        required.
+        A compatible modern browser can receive your screen without installing an app. Playback delay depends on the device, browser and network. Use a trusted local network.
       </p>
       <div className="url-box">
         <label>Open this on the receiving device</label>

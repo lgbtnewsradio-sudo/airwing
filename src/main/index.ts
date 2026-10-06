@@ -12,10 +12,13 @@ import {
   shell,
   globalShortcut,
   Notification,
+  safeStorage,
   type MenuItemConstructorOptions,
 } from 'electron';
 import { join } from 'node:path';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, promises as fs } from 'node:fs';
+import { sanitizeDiagnostics, redactText } from '@shared/privacy';
+import { configureFirewall } from './firewall';
 import { execFile } from 'node:child_process';
 import {
   IPC,
@@ -69,7 +72,7 @@ let quitting = false;
 const userData = app.getPath('userData');
 log.setFile(join(userData, 'logs', 'airwing.log'));
 const settings = new SettingsStore(userData);
-const credentials = new CredentialStore(userData);
+const credentials = new CredentialStore(userData, safeStorage);
 const hub = new StreamHub();
 // In a packaged build the resources folder ships inside app.asar; Electron's fs reads it transparently.
 const resourcesDir = app.isPackaged ? join(app.getAppPath(), 'resources') : join(process.cwd(), 'resources');
@@ -82,7 +85,11 @@ const server = new LocalServer({
   deviceName: () => senderName(),
 });
 const discovery = new Discovery({ isPaired: (key) => !!credentials.get(key) });
-const sessions = new SessionManager({ hub, server, credentials, senderName: () => senderName(), requestCastMirrorKeyframe: () => sendCaptureCommand({ type: 'castMirrorKeyframe' }) });
+const sessions = new SessionManager({ hub, server, credentials, senderName: () => senderName(),
+  requestCastMirrorKeyframe: () => sendCaptureCommand({ type: 'castMirrorKeyframe' }),
+  requestCastBitrate: (bitrate) => sendCaptureCommand({ type: 'castMirrorBitrate', bitrate }),
+  adaptiveCastEnabled: () => currentConfig?.adaptiveCast !== false,
+});
 
 /** Current capture request (set by the renderer before calling getDisplayMedia). */
 let pendingCapture: { sourceId: string; audio: boolean; muteLocal: boolean } | null = null;
@@ -490,6 +497,8 @@ function registerIpc(): void {
     sessions.pushCastMirrorFrame(buf, keyframe, timestampUs, width, height);
   });
   ipcMain.on(IPC.castMirrorUnavailable, () => sessions.markCastMirrorUnavailable());
+  ipcMain.on(IPC.castMirrorAudio, (_e, data: Uint8Array, timestampUs: number) => sessions.pushCastAudioFrame(data, timestampUs));
+  ipcMain.on(IPC.castMirrorEncoder, (_e, info) => sessions.setCastEncoder(info));
   ipcMain.on(IPC.streamState, (_e, state: { active: boolean; paused: boolean; dropped?: number; error?: string; reason?: string }) => {
     if (state.error) log.error('capture', state.error);
     else if (state.reason && !state.active) log.info('capture', `capture stopped: ${state.reason}`);
@@ -545,6 +554,7 @@ function registerIpc(): void {
   ipcMain.handle(IPC.settingsGet, () => settings.get());
   ipcMain.handle(IPC.settingsSet, (_e, patch: Partial<AppSettings>) => {
     const before = settings.get();
+    if (process.windowsStore && patch.launchAtLogin !== undefined) throw new Error('Startup registration is not available in this Store edition.');
     const after = settings.set(patch);
     if (patch.hotkeys) registerHotkeys();
     if (patch.launchAtLogin !== undefined && patch.launchAtLogin !== before.launchAtLogin) {
@@ -569,9 +579,38 @@ function registerIpc(): void {
     return { path, name: media.name, mime: media.mime, size: media.size, url: server.mediaUrl('127.0.0.1', media) };
   });
   ipcMain.handle(IPC.appVersion, () => appVersion());
+  ipcMain.handle(IPC.appDistribution, () => process.windowsStore ? 'store' : 'desktop');
   ipcMain.handle(IPC.appOpenExternal, (_e, url: string) => shell.openExternal(url));
   ipcMain.handle(IPC.appQuit, () => quitApp());
   ipcMain.handle(IPC.logList, () => log.list());
+  ipcMain.handle(IPC.firewallConfigure, (_e, publicNetwork: boolean) => configureFirewall(process.execPath, publicNetwork === true));
+  ipcMain.handle(IPC.diagnosticsExport, async () => {
+    const result = await dialog.showSaveDialog(mainWindow!, {
+      title: 'Save privacy-safe support bundle', defaultPath: `AirWing-support-${new Date().toISOString().slice(0, 10)}.json`,
+      filters: [{ name: 'Support bundle', extensions: ['json'] }],
+    });
+    if (result.canceled || !result.filePath) return false;
+    let diskLog = '';
+    if (log.filePath) {
+      try {
+        const file = await fs.open(log.filePath, 'r');
+        try {
+          const size = (await file.stat()).size;
+          const tail = Buffer.alloc(Math.min(size, 1024 * 1024));
+          await file.read(tail, 0, tail.length, Math.max(0, size - tail.length));
+          diskLog = redactText(tail.toString('utf8'));
+        } finally { await file.close(); }
+      } catch { diskLog = 'Disk log unavailable'; }
+    }
+    const bundle = sanitizeDiagnostics({
+      version: appVersion(), generatedAt: new Date().toISOString(),
+      runtime: process.versions, windowsVersion: process.getSystemVersion(),
+      settings: settings.get(), sessions: sessions.list(), stats: hub.stats(sessions.count),
+      logs: log.list(), diskLog,
+    });
+    await fs.writeFile(result.filePath, JSON.stringify(bundle, null, 2), 'utf8');
+    return true;
+  });
   ipcMain.handle(IPC.windowMinimize, () => mainWindow?.minimize());
   ipcMain.handle(IPC.windowClose, () => mainWindow?.close());
 }
@@ -654,6 +693,7 @@ function quitApp(): void {
 app.on('second-instance', () => showWindow());
 
 app.whenReady().then(async () => {
+  credentials.migrate();
   log.info('app', `AirWing ${appVersion()} starting (electron ${process.versions.electron}, chrome ${process.versions.chrome})`);
   installDisplayMediaHandler();
   registerIpc();

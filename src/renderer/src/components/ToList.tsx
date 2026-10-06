@@ -112,10 +112,15 @@ export function ToList({ devices, sessions, settings, onToggle, onRescan, onAddM
                 <span className="row-sub">
                   {state === 'connecting' && 'Connecting…'}
                   {state === 'pairing' && 'Waiting for the code on screen'}
-                  {live && (state === 'paused' ? 'Paused' : d.kind === 'web' ? 'Streaming' : 'Streaming · a few seconds behind')}
+                  {live && (state === 'paused' ? 'Paused' : `Streaming · ${s?.transport === 'cast-mirroring' ? 'Cast realtime' : s?.transport || subtitle(d)}`)}
                   {state === 'error' && (s?.error ?? 'Failed')}
                   {!state && (unsupportedLabel(d) ?? subtitle(d))}
                 </span>
+                {live && s?.health && <span className="row-sub">
+                  {s.health.width} × {s.health.height} · {s.health.fps.toFixed(0)} fps · {(s.health.bitrate / 1e6).toFixed(1)} Mbps · {s.health.audio === 'opus' ? 'Audio on' : s.health.audio === 'off' ? 'Audio off' : 'Audio unavailable'}
+                  {' · '}{s.health.status === 'recovering' ? 'Recovering' : s.health.status === 'starting' ? 'Starting' : 'Connected'}
+                  {s.health.lossPercent !== undefined && ` · Loss ${s.health.lossPercent.toFixed(1)}%`}
+                </span>}
               </span>
               <span className={`dot ${live ? 'on' : state === 'connecting' || state === 'pairing' ? 'pending' : state === 'error' ? 'bad' : ''}`} />
             </button>

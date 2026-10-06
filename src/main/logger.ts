@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { appendFileSync, existsSync, mkdirSync, renameSync, statSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { LogEvent } from '@shared/types';
+import { redactText } from '@shared/privacy';
 
 /**
  * How long to wait before retrying disk logging after a failed write. On Windows a second
@@ -58,6 +59,7 @@ class Logger extends EventEmitter {
   }
 
   private push(level: LogEvent['level'], scope: string, message: string): void {
+    message = redactText(message);
     const ev: LogEvent = { ts: Date.now(), level, scope, message };
     this.buffer.push(ev);
     if (this.buffer.length > this.max) this.buffer.shift();

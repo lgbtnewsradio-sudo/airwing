@@ -163,9 +163,11 @@ describe('Cast RTP frame layout and encryption', () => {
       // ~3.5x the 1200-byte packet payload cap -> 4 packets.
       const au = Buffer.alloc(4200);
       for (let i = 0; i < au.length; i++) au[i] = i & 0xff;
+      sender.sendVideoFrame(Buffer.from('initial keyframe'), true);
+      await new Promise((r) => setTimeout(r, 100));
       sender.sendVideoFrame(au, false);
       await new Promise((r) => setTimeout(r, 200));
-      const sent = raw.filter(isVideoPacket);
+      const sent = raw.filter((p) => isVideoPacket(p) && p[13] === 1);
       expect(sent.length).toBe(4);
       const key = (sender as any).videoKey as Buffer;
       const ivMask = (sender as any).videoIvMask as Buffer;

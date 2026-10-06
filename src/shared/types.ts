@@ -73,6 +73,8 @@ export interface StreamConfig {
   frameRate: FrameRatePreset;
   quality: QualityPreset;
   latency: LatencyMode;
+  adaptiveCast?: boolean;
+  castAudio?: boolean;
   audio: boolean;
   /** Mute local playback while streaming system audio. */
   muteLocal: boolean;
@@ -111,6 +113,31 @@ export interface SessionInfo {
   position?: number;
   duration?: number;
   playing?: boolean;
+  health?: SessionHealth;
+}
+
+export interface SessionHealth {
+  width: number;
+  height: number;
+  fps: number;
+  bitrate: number;
+  audio: 'opus' | 'off' | 'unavailable';
+  lossPercent?: number;
+  repairPercent?: number;
+  jitterMs?: number;
+  rttMs?: number;
+  queueDepth?: number;
+  queueAgeMs?: number;
+  status: 'starting' | 'healthy' | 'recovering';
+}
+
+export interface CastEncoderInfo {
+  width: number;
+  height: number;
+  fps: number;
+  bitrate: number;
+  audioRequested: boolean;
+  audio?: { sampleRate: number; channels: number; bitrate: number };
 }
 
 export interface StreamStats {
@@ -213,10 +240,15 @@ export const IPC = {
   receiverInfo: 'receiver:info',
   mediaPick: 'media:pick',
   appVersion: 'app:version',
+  appDistribution: 'app:distribution',
   appOpenExternal: 'app:openExternal',
   appQuit: 'app:quit',
   logEvent: 'log:event',
   logList: 'log:list',
+  diagnosticsExport: 'diagnostics:export',
+  firewallConfigure: 'firewall:configure',
+  castMirrorAudio: 'castMirror:audio',
+  castMirrorEncoder: 'castMirror:encoder',
   windowMinimize: 'window:minimize',
   windowClose: 'window:close',
   extendDesktopInfo: 'extend:info',
@@ -238,6 +270,8 @@ export const DEFAULT_STREAM_CONFIG: StreamConfig = {
   frameRate: 30,
   quality: 'auto',
   latency: 'balanced',
+  adaptiveCast: true,
+  castAudio: true,
   audio: true,
   muteLocal: false,
   audioBitrate: 160000,
@@ -286,6 +320,7 @@ export type CaptureCommand =
   | { type: 'stop' }
   | { type: 'pause'; paused: boolean }
   | { type: 'keyframe' }
-  | { type: 'castMirrorKeyframe' };
+  | { type: 'castMirrorKeyframe' }
+  | { type: 'castMirrorBitrate'; bitrate: number };
 
 export const RECEIVER_MDNS_SERVICE = '_airwing._tcp.local';

@@ -5,11 +5,12 @@
  */
 
 import { EventEmitter } from 'node:events';
-import type { Device, MediaControlAction, SessionInfo, SessionState } from '@shared/types';
+import type { CastEncoderInfo, Device, MediaControlAction, SessionInfo, SessionState } from '@shared/types';
 import { AirPlayClient, PairingRequiredError } from './airplay/client';
 import { MirrorClient } from './airplay/mirror';
 import { CastClient } from './cast/castClient';
 import type { MirroringSender } from './cast/mirroring';
+import { AdaptiveCastBitrate } from './cast/adaptiveBitrate';
 import type { StreamHub } from './streamHub';
 import type { LocalServer, RegisteredMedia } from './server';
 import type { CredentialStore } from './settings';
@@ -69,6 +70,8 @@ export interface SessionManagerOptions {
   reachTimeoutMs?: number;
   /** Ask the renderer's Cast Streaming (VP8) tap for a fresh keyframe right now. */
   requestCastMirrorKeyframe?: () => void;
+  adaptiveCastEnabled?: () => boolean;
+  requestCastBitrate?: (bitrate: number) => void;
 }
 
 export class SessionManager extends EventEmitter {
@@ -81,6 +84,8 @@ export class SessionManager extends EventEmitter {
   private castMirrorProbing = false;
   private castMirrorTapActive = false;
   private castMirrorProbe: { resolve: (sample: CastMirrorProbeSample | null) => void } | null = null;
+  private castEncoder: CastEncoderInfo | null = null;
+  private readonly castBitrates = new Map<string, number>();
 
   constructor(private readonly opts: SessionManagerOptions) {
     super();
@@ -291,10 +296,44 @@ export class SessionManager extends EventEmitter {
       const sender = await client.startMirroring({
         width: probe.width,
         height: probe.height,
-        frameRateHint: meta?.encoder?.frameRate || 30,
-        maxBitrate: meta?.encoder?.videoBitrate || 6_000_000,
+        frameRateHint: this.castEncoder?.fps ?? Math.min(30, meta?.encoder?.frameRate || 30),
+        maxBitrate: this.castEncoder?.bitrate ?? 3_000_000,
+        audio: this.castEncoder?.audio,
       });
       session.castMirror = sender;
+      const ceiling = this.castEncoder?.bitrate ?? 3_000_000;
+      const adaptive = new AdaptiveCastBitrate(ceiling);
+      let lastReceiverReportAt = -Infinity;
+      const adjust = (pressure: number) => {
+        if (this.opts.adaptiveCastEnabled?.() === false || session.stopping) return;
+        const bitrate = adaptive.sample(pressure, performance.now());
+        if (bitrate !== null) {
+          this.castBitrates.set(device.id, bitrate);
+          this.opts.requestCastBitrate?.(Math.min(...this.castBitrates.values()));
+        }
+      };
+      this.castBitrates.set(device.id, ceiling);
+      session.info.health = { width: probe.width, height: probe.height, fps: 0, bitrate: ceiling,
+        audio: sender.audioAccepted ? 'opus' : this.castEncoder?.audioRequested ? 'unavailable' : 'off', status: 'starting' };
+      sender.on('health', (sample) => {
+        if (session.stopping || !session.info.health) return;
+        this.update(session, { health: { ...session.info.health, ...sample,
+          status: sample.queueAgeMs > 100 || (session.info.health.lossPercent ?? 0) >= 3 ? 'recovering' : 'healthy' } });
+      });
+      sender.on('feedback', (feedback: { loss: number; jitterMs: number; rttMs: number | null }) => {
+        if (session.stopping || !session.info.health) return;
+        lastReceiverReportAt = performance.now();
+        this.update(session, { health: { ...session.info.health, lossPercent: feedback.loss * 100,
+          jitterMs: feedback.jitterMs, rttMs: feedback.rttMs ?? undefined,
+          status: feedback.loss >= 0.03 ? 'recovering' : 'healthy' } });
+        adjust(feedback.loss);
+      });
+      sender.on('repair-window', ({ pressure }: { pressure: number }) => {
+        if (session.stopping || !session.info.health) return;
+        this.update(session, { health: { ...session.info.health, repairPercent: pressure * 100,
+          status: pressure >= 0.03 ? 'recovering' : 'healthy' } });
+        if (performance.now() - lastReceiverReportAt > 5000) adjust(pressure);
+      });
       sender.on('error', (err: Error) => {
         if (session.stopping) return;
         this.unregisterCastMirror(device.id);
@@ -353,7 +392,19 @@ export class SessionManager extends EventEmitter {
       resolve({ data: chunk, keyframe, timestampUs, width, height });
       return;
     }
-    for (const s of this.castMirrorClients.values()) s.sendVideoFrame(chunk, keyframe);
+    for (const s of this.castMirrorClients.values()) s.sendVideoFrame(chunk, keyframe, timestampUs);
+  }
+
+  setCastEncoder(info: NonNullable<SessionManager['castEncoder']>): void {
+    this.castEncoder = info;
+    for (const session of this.sessions.values()) if (session.castMirror && session.info.health) {
+      this.update(session, { health: { ...session.info.health, width: info.width, height: info.height, bitrate: info.bitrate,
+        audio: session.castMirror.audioAccepted && info.audio ? 'opus' : info.audioRequested ? 'unavailable' : 'off' } });
+    }
+  }
+
+  pushCastAudioFrame(data: Uint8Array, timestampUs: number): void {
+    for (const sender of this.castMirrorClients.values()) sender.sendAudioFrame(data, timestampUs);
   }
 
   private setCastMirrorProbing(probing: boolean): void {
@@ -368,6 +419,8 @@ export class SessionManager extends EventEmitter {
 
   private unregisterCastMirror(id: string): void {
     this.castMirrorClients.delete(id);
+    this.castBitrates.delete(id);
+    if (this.castBitrates.size && this.opts.adaptiveCastEnabled?.() !== false) this.opts.requestCastBitrate?.(Math.min(...this.castBitrates.values()));
     this.syncCastMirrorTap();
   }
 
@@ -376,6 +429,7 @@ export class SessionManager extends EventEmitter {
     const shouldBeActive = this.castMirrorProbing || this.castMirrorClients.size > 0;
     if (shouldBeActive === this.castMirrorTapActive) return;
     this.castMirrorTapActive = shouldBeActive;
+    if (!shouldBeActive) this.castEncoder = null;
     this.emit('castMirror-tap', shouldBeActive);
   }
 

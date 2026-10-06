@@ -12,7 +12,7 @@
  */
 
 import { Fmp4Muxer, avcCodecString, type FragmentInfo } from '@shared/fmp4';
-import type { EncoderInfo, StreamConfig, StreamMeta } from '@shared/types';
+import type { CastEncoderInfo, EncoderInfo, StreamConfig, StreamMeta } from '@shared/types';
 
 export interface PipelineEvents {
   state: (state: { active: boolean; paused: boolean; error?: string; reason?: string }) => void;
@@ -109,6 +109,13 @@ export class CapturePipeline {
    * (Chrome Mirroring) requires VP8, not H.264.
    */
   private vp8Encoder: VideoEncoder | null = null;
+  private castAudioEncoder: AudioEncoder | null = null;
+  private vp8Config: VideoEncoderConfig | null = null;
+  private castGeneration = 0;
+  private castMirrorRequested = false;
+  private lastCastEncodedUs = -Infinity;
+  onRawAudioOpus: ((data: Uint8Array, timestampUs: number) => void) | null = null;
+  onCastEncoder: ((info: CastEncoderInfo) => void) | null = null;
   private castMirrorTap = false;
   private castMirrorKeyframeRequested = true;
   private castMirrorLastKeyframeUs = -Infinity;
@@ -408,7 +415,8 @@ export class CapturePipeline {
       this.lastKeyframeUs = ts;
     }
     (frame as any).__durationUs = durationTicks * this.frameIntervalUs;
-    if (this.castMirrorTap && this.vp8Encoder && this.vp8Encoder.state === 'configured' && this.vp8Encoder.encodeQueueSize <= 2) {
+    if (this.castMirrorTap && this.vp8Encoder && this.vp8Encoder.state === 'configured' && this.vp8Encoder.encodeQueueSize <= 2 && ts - this.lastCastEncodedUs >= 32_000) {
+      this.lastCastEncodedUs = ts;
       const vp8Key = this.castMirrorKeyframeRequested || ts - this.castMirrorLastKeyframeUs >= this.castMirrorGopUs;
       if (vp8Key) {
         this.castMirrorKeyframeRequested = false;
@@ -556,6 +564,7 @@ export class CapturePipeline {
       }
       data.close();
       const restamped = new AudioData({ format: 'f32-planar', sampleRate: sr, numberOfFrames: frames, numberOfChannels: channels, timestamp, data: planar });
+      if (this.castAudioEncoder?.state === 'configured' && this.castAudioEncoder.encodeQueueSize <= 2 && sr === 48000 && channels === this.audioChannels) this.castAudioEncoder.encode(restamped);
       encoder.encode(restamped);
       restamped.close();
     }
@@ -680,11 +689,15 @@ export class CapturePipeline {
    * calls onCastMirrorUnavailable and resolves anyway) so the caller can fall back promptly.
    */
   async setCastMirrorTap(active: boolean): Promise<void> {
-    if (this.castMirrorTap === active) return;
+    if (this.castMirrorRequested === active) return;
+    this.castMirrorRequested = active;
+    const generation = ++this.castGeneration;
     if (!active) {
       this.castMirrorTap = false;
       if (this.vp8Encoder && this.vp8Encoder.state !== 'closed') this.vp8Encoder.close();
       this.vp8Encoder = null;
+      if (this.castAudioEncoder?.state !== 'closed') this.castAudioEncoder?.close(); this.castAudioEncoder = null;
+      this.vp8Config = null;
       this.vp8EncodeStart.clear();
       this.vp8LatSum = 0;
       this.vp8LatMax = 0;
@@ -706,7 +719,7 @@ export class CapturePipeline {
     const vp8Scale = Math.min(1, 720 / Math.min(this.target.width, this.target.height));
     const vp8Width = even(this.target.width * vp8Scale);
     const vp8Height = even(this.target.height * vp8Scale);
-    const frameRate = this.config?.frameRate ?? 30;
+    const frameRate = Math.min(30, this.config?.frameRate ?? 30);
     const bitrate = pickBitrate(vp8Width, vp8Height, frameRate, this.config?.quality ?? 'balanced');
     let cfg: VideoEncoderConfig | null = null;
     for (const accel of ['prefer-hardware', 'no-preference'] as const) {
@@ -735,6 +748,25 @@ export class CapturePipeline {
       this.onCastMirrorUnavailable?.();
       return;
     }
+    if (!this.running || generation !== this.castGeneration) return;
+    if (this.config?.audio && this.config.castAudio !== false && this.audioEncoder && this.audioSampleRate === 48000) {
+      const audioConfig: AudioEncoderConfig = { codec: 'opus', sampleRate: 48000, numberOfChannels: this.audioChannels,
+        bitrate: Math.min(192000, Math.max(64000, this.config.audioBitrate)), opus: { frameDuration: 20000, format: 'opus' } };
+      try {
+        if ((await AudioEncoder.isConfigSupported(audioConfig)).supported && this.running && generation === this.castGeneration) {
+          const opus = new AudioEncoder({ output: (chunk) => {
+            if (!this.castMirrorTap || generation !== this.castGeneration) return;
+            const bytes = new Uint8Array(chunk.byteLength); chunk.copyTo(bytes);
+            this.onRawAudioOpus?.(bytes, chunk.timestamp);
+          }, error: (err) => {
+            console.warn('Cast audio encoder failed', err);
+            if (this.castAudioEncoder?.state !== 'closed') this.castAudioEncoder?.close(); this.castAudioEncoder = null; this.reportCastEncoder();
+          } });
+          opus.configure(audioConfig); this.castAudioEncoder = opus;
+        }
+      } catch (err) { console.warn('Cast audio encoding unavailable', err); }
+    }
+    if (!this.running || generation !== this.castGeneration) { this.castAudioEncoder?.close(); this.castAudioEncoder = null; return; }
     // Which accelerator actually won was never logged, so a silent software fallback (the
     // exact condition the 720p cap above exists to avoid) was invisible until now.
     console.log(`[vp8cfg] accel=${cfg.hardwareAcceleration} ${vp8Width}x${vp8Height}@${frameRate} bitrate=${bitrate}`);
@@ -745,9 +777,30 @@ export class CapturePipeline {
       error: (e) => console.warn('VP8 encoder error', e),
     });
     encoder.configure(cfg);
+    this.vp8Config = cfg;
     this.vp8Encoder = encoder;
     this.castMirrorTap = true;
+    this.lastCastEncodedUs = -Infinity;
+    this.reportCastEncoder();
     this.castMirrorKeyframeRequested = true;
+  }
+
+  setCastBitrate(bitrate: number): void {
+    if (!this.vp8Config || this.vp8Encoder?.state !== 'configured') return;
+    if (!Number.isFinite(bitrate)) return;
+    const config = { ...this.vp8Config, bitrate: Math.max(600000, Math.min(8000000, Math.round(bitrate))) };
+    try {
+      this.vp8Encoder.configure(config); this.vp8Config = config;
+      this.castMirrorKeyframeRequested = true; this.reportCastEncoder();
+    } catch (err) { console.warn('Cast bitrate adjustment failed', err); }
+  }
+
+  private reportCastEncoder(): void {
+    if (!this.vp8Config) return;
+    this.onCastEncoder?.({ width: this.vp8Width, height: this.vp8Height,
+      fps: this.vp8Config.framerate ?? 30, bitrate: this.vp8Config.bitrate ?? 3000000,
+      audioRequested: this.config?.audio === true && this.config.castAudio !== false,
+      audio: this.castAudioEncoder ? { sampleRate: 48000, channels: this.audioChannels, bitrate: Math.min(192000, Math.max(64000, this.config?.audioBitrate ?? 160000)) } : undefined });
   }
 
   private onVp8Chunk(chunk: EncodedVideoChunk): void {
@@ -786,6 +839,10 @@ export class CapturePipeline {
   }
 
   private async stopInternal(reason?: string): Promise<void> {
+    ++this.castGeneration;
+    this.castMirrorRequested = false;
+    if (this.castAudioEncoder?.state !== 'closed') this.castAudioEncoder?.close(); this.castAudioEncoder = null;
+    this.vp8Config = null;
     if (this.stopping) return;
     this.stopping = true;
     const wasRunning = this.running;

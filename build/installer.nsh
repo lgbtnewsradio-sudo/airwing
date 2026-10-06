@@ -9,10 +9,10 @@
 ; are ignored. AirWing also detects the condition at runtime and explains it in the UI.
 
 !macro customInstall
-  DetailPrint "Adding Windows Firewall rule for AirWing (private + public networks)"
+  DetailPrint "Adding Windows Firewall rule for AirWing (private networks only)"
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="AirWing"'
   Pop $0
-  nsExec::ExecToLog 'netsh advfirewall firewall add rule name="AirWing" dir=in action=allow program="$INSTDIR\AirWing.exe" enable=yes profile=private,public description="Allow AirWing to serve its live stream to receivers on your network"'
+  nsExec::ExecToLog 'netsh advfirewall firewall add rule name="AirWing" dir=in action=allow program="$INSTDIR\AirWing.exe" enable=yes profile=private description="Allow AirWing to serve its live stream on trusted private networks"'
   Pop $0
 !macroend
 

@@ -62,6 +62,8 @@ export function App() {
         // Google Cast low-latency (Cast Streaming / VP8) tap.
         p.onRawVideoVp8 = (chunk, keyframe, ts, w, h) => api.capture.sendCastMirrorFrame(chunk, keyframe, ts, w, h);
         p.onCastMirrorUnavailable = () => api.capture.sendCastMirrorUnavailable();
+        p.onRawAudioOpus = (data, ts) => api.capture.sendCastMirrorAudio(data, ts);
+        p.onCastEncoder = (info) => api.capture.sendCastMirrorEncoder(info);
         return p;
       })(),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -74,6 +76,14 @@ export function App() {
     } catch (err) {
       setError((err as Error).message);
     }
+  }, [api]);
+
+  const saveSettings = useCallback((patch: Partial<AppSettings>) => {
+    setSettings((current) => current ? { ...current, ...patch } : current);
+    void api.settings.set(patch).catch(async (err) => {
+      setError((err as Error).message);
+      setSettings(await api.settings.get());
+    });
   }, [api]);
 
   useEffect(() => {
@@ -95,7 +105,7 @@ export function App() {
       api.devices.onChange(setDevices),
       api.sessions.onChange(setSessions),
       api.capture.onStats(setStats),
-      api.settings.onChange(setSettings),
+      api.settings.onChange((s) => { setSettings(s); setConfig({ ...DEFAULT_STREAM_CONFIG, ...s.stream }); }),
       api.pairing.onPrompt(setPairing),
       api.app.onLog((ev) => setLogs((prev) => [...prev.slice(-499), ev])),
       api.capture.onMirrorTap((active) => pipeline.setMirrorTap(active)),
@@ -110,6 +120,7 @@ export function App() {
           else if (cmd.type === 'pause') pipeline.setPaused(cmd.paused);
           else if (cmd.type === 'keyframe') pipeline.requestKeyframe();
           else if (cmd.type === 'castMirrorKeyframe') pipeline.requestCastMirrorKeyframe();
+          else if (cmd.type === 'castMirrorBitrate') pipeline.setCastBitrate(cmd.bitrate);
         } catch (err) {
           setError((err as Error).message);
         }
@@ -265,6 +276,7 @@ export function App() {
         <span className="logo">✈</span>
         <span className="app-name">AirWing</span>
         {version && <span className="app-version">v{version}</span>}
+        {captureState.active && <span className="app-version" role="status">{captureState.paused ? 'Capture paused' : '● Capturing'}</span>}
         <div className="window-controls">
           <button title="Minimise to tray" onClick={() => api.app.minimize()}>
             ─
@@ -334,8 +346,8 @@ export function App() {
             <button className="back" onClick={() => setView('main')}>
               ‹ Back
             </button>
-            {view === 'settings' && <SettingsPanel settings={settings} onChange={(p) => api.settings.set(p)} />}
-            {view === 'browser' && <ReceiverPanel info={receiver} settings={settings} onSettings={(p) => api.settings.set(p)} stats={stats} />}
+            {view === 'settings' && <SettingsPanel settings={settings} onChange={saveSettings} />}
+            {view === 'browser' && <ReceiverPanel info={receiver} settings={settings} onSettings={saveSettings} stats={stats} />}
             {view === 'logs' && <LogPanel logs={logs} />}
             {view === 'extend' && (
               <ExtendPanel

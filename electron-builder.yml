@@ -8,6 +8,9 @@ files:
   - out/**
   - resources/**
   - package.json
+  - LICENSE
+  - NOTICE
+  - docs/PRIVACY.md
 asarUnpack:
   - resources/**
 win:

@@ -35,6 +35,7 @@ import { randomBytes, createCipheriv } from 'node:crypto';
 import { Application, JsonController } from 'castv2-client';
 import { log } from '../logger';
 import { RtpPacingQueue, type RtpQueuedFrame } from './rtpPacingQueue';
+import { CastAudioTransport, type CastAudioConfig } from './audioTransport';
 
 export const MIRRORING_APP_ID = '0F5096E8';
 export const WEBRTC_NAMESPACE = 'urn:x-cast:com.google.cast.webrtc';
@@ -142,12 +143,12 @@ export interface MirroringVideoConfig {
   height: number;
   frameRateHint: number;
   maxBitrate: number;
+  audio?: CastAudioConfig;
 }
 
 /**
  * Owns one Cast Streaming session: OFFER/ANSWER, then a UDP socket carrying encrypted,
- * packetized VP8 frames paced by RtpPacingQueue. Video-only for now; see NOTICE-worthy
- * follow-up for Opus audio.
+ * packetized VP8 frames paced by RtpPacingQueue, with an optional independent Opus stream.
  */
 export class MirroringSender extends EventEmitter {
   private socket: dgram.Socket | null = null;
@@ -176,6 +177,16 @@ export class MirroringSender extends EventEmitter {
   private feedbackRequested = 0;
   private feedbackRetransmitted = 0;
   private closed = false;
+  private readonly audio = new CastAudioTransport((packet) => this.socket?.send(packet, this.remotePort, this.host));
+  audioAccepted = false;
+  private syncAnchor: { captureUs: number; videoRtp: number } | null = null;
+  private frameSampleStart = 0;
+  private framesInSample = 0;
+  private originalPacketsInWindow = 0;
+  private repairRequestsInWindow = 0;
+  private repairWindowStartedAt = performance.now();
+  private readonly epochWallMs = Date.now();
+  private readonly epochMonotonicMs = performance.now();
 
   constructor(
     private readonly host: string,
@@ -211,6 +222,7 @@ export class MirroringSender extends EventEmitter {
           resolutions: [{ width: video.width, height: video.height }],
           receiverRtcpEventLog: true,
         },
+        ...(video.audio ? [this.audio.offer(video.audio)] : []),
       ],
     };
     log.info(this.scope, `sending OFFER: vp8 ${video.width}x${video.height}@${video.frameRateHint}`);
@@ -221,6 +233,7 @@ export class MirroringSender extends EventEmitter {
     const sendIndexes: number[] = answer.sendIndexes ?? [];
     if (!sendIndexes.includes(0)) throw new Error(`receiver did not accept the video stream: ${JSON.stringify(answerMsg).slice(0, 300)}`);
     this.remotePort = udpPort;
+    this.audioAccepted = !!video.audio && sendIndexes.includes(1);
     this.socket = dgram.createSocket('udp4');
     this.socket.on('error', (err) => {
       log.warn(this.scope, `UDP socket error: ${err.message}`);
@@ -230,7 +243,8 @@ export class MirroringSender extends EventEmitter {
     // signal (proof the receiver is actually processing what we send), and parse every one
     // for the jitter/RTT/loss diagnostics below.
     let sawReceiverTraffic = false;
-    this.socket.on('message', (msg) => {
+    this.socket.on('message', (msg, remote) => {
+      if (remote.address !== this.host) return;
       if (!sawReceiverTraffic) {
         sawReceiverTraffic = true;
         log.info(this.scope, `receiver sent its first packet back (${msg.length} bytes) — session is live; feedback=${msg.toString('hex').slice(0, 128)}`);
@@ -253,20 +267,30 @@ export class MirroringSender extends EventEmitter {
 
   /** Encrypt, packetize and hand off one VP8 frame to the pacing queue; actual sending happens
    *  on the queue's own wall-clock tick, not synchronously here. */
-  sendVideoFrame(vp8: Uint8Array, isKeyFrame: boolean): void {
+  sendVideoFrame(vp8: Uint8Array, isKeyFrame: boolean, captureTimestampUs?: number): void {
     if (!this.pacing || this.closed) return;
     // A stream must begin with a decodable frame 0. Dropping pre-keyframe deltas prevents the
     // receiver from beginning the session with a permanently missing dependency.
     if (!this.sentFirstKeyFrame && !isKeyFrame) return;
     if (isKeyFrame) this.sentFirstKeyFrame = true;
     const queuedFrameId = ++this.queuedFrameCounter;
-    this.pacing.enqueue({ data: vp8, keyFrame: isKeyFrame, frameId: queuedFrameId, referencedFrameId: queuedFrameId });
+    this.pacing.enqueue({ data: vp8, keyFrame: isKeyFrame, frameId: queuedFrameId, referencedFrameId: queuedFrameId, captureTimestampUs });
+  }
+
+  sendAudioFrame(data: Uint8Array, captureUs: number): void {
+    if (!this.audioAccepted || !this.syncAnchor || !this.pacing || this.closed) return;
+    const videoElapsedMs = ((this.pacing.currentRtpTimestamp() - this.syncAnchor.videoRtp) | 0) / 90;
+    const captureElapsedMs = (captureUs - this.syncAnchor.captureUs) / 1000;
+    if (videoElapsedMs - captureElapsedMs > 150 || captureElapsedMs - videoElapsedMs > 150) return;
+    this.audio.sendFrame(data, (this.audio.rtpOrigin + Math.round(captureElapsedMs * 48)) >>> 0);
   }
 
   /** Called by the pacing queue at send time with the wall-clock-derived RTP timestamp for
    *  this tick; this is the only place packets actually go out on the wire. */
   private dispatchFrame(frame: RtpQueuedFrame, rtpTimestamp: number): void {
     if (!this.socket || this.closed) return;
+    if (!this.syncAnchor && frame.captureTimestampUs !== undefined) this.syncAnchor = { captureUs: frame.captureTimestampUs, videoRtp: rtpTimestamp };
+    this.framesInSample++;
     const frameId = ++this.frameCounter;
     // Per encoded_frame.h: keyframes self-reference; each delta depends on the immediately
     // preceding frame that was actually sent. Assigning this here guarantees no wire gaps.
@@ -290,6 +314,7 @@ export class MirroringSender extends EventEmitter {
       this.sentFrames.delete(oldest);
     }
     for (const packet of packets) this.sendPacket(packet);
+    this.originalPacketsInWindow += packets.length;
     this.logClockSample(rtpTimestamp);
     // Start RTCP after the first frame's own packets so its Sender Report already reflects
     // real, non-zero counts rather than reporting zero for the "as of now" cumulative fields.
@@ -312,6 +337,8 @@ export class MirroringSender extends EventEmitter {
     const now = performance.now();
     if (now - this.lastQueueLogAtMs < DIAG_LOG_INTERVAL_MS) return;
     this.lastQueueLogAtMs = now;
+    this.emit('health', { fps: this.frameSampleStart ? this.framesInSample * 1000 / (now - this.frameSampleStart) : 0, queueDepth: depth, queueAgeMs: oldestAgeMs });
+    this.frameSampleStart = now; this.framesInSample = 0;
     log.info(this.scope, `[rtpqueue] depth=${depth} oldestAge=${oldestAgeMs.toFixed(0)}ms`);
   }
 
@@ -337,7 +364,7 @@ export class MirroringSender extends EventEmitter {
   /** RFC 3550 §6.4.1: a bare Sender Report (no reception report blocks — we send, not receive). */
   private sendSenderReport(): void {
     if (!this.socket || this.closed || !this.pacing) return;
-    const nowMs = Date.now();
+    const nowMs = this.epochWallMs + performance.now() - this.epochMonotonicMs;
     const ntpSeconds = Math.floor(nowMs / 1000) + NTP_UNIX_EPOCH_OFFSET;
     const ntpFraction = Math.round(((nowMs % 1000) / 1000) * 0x100000000);
     this.lastSrNtpMiddle32 = this.ntpMiddle32(ntpSeconds, ntpFraction);
@@ -358,6 +385,14 @@ export class MirroringSender extends EventEmitter {
     this.socket.send(sr, this.remotePort, this.host, (err) => {
       if (err) log.debug(this.scope, `RTCP SR send error: ${err.message}`);
     });
+    if (this.audioAccepted && this.syncAnchor) {
+      const audioSr = Buffer.from(sr);
+      audioSr.writeUInt32BE(this.audio.ssrc, 4);
+      audioSr.writeUInt32BE((this.audio.rtpOrigin + Math.round(((rtpTimestamp - this.syncAnchor.videoRtp) | 0) * 48000 / 90000)) >>> 0, 16);
+      audioSr.writeUInt32BE(this.audio.packetsSent >>> 0, 20);
+      audioSr.writeUInt32BE(this.audio.octetsSent >>> 0, 24);
+      this.socket.send(audioSr, this.remotePort, this.host);
+    }
   }
 
   private ntpMiddle32(ntpSeconds: number, ntpFraction: number): number {
@@ -368,9 +403,8 @@ export class MirroringSender extends EventEmitter {
    * Parse an incoming RTCP Receiver Report (RFC 3550 §6.4.2) for the three fields that bear
    * on latency: jitter (the receiver's own view of our timing), RTT (from LSR/DLSR against
    * the most recent Sender Report), and loss. High loss sheds the pacing queue toward the
-   * newest frame immediately rather than waiting for the age-based drop to catch up, since
-   * this stream has no retransmission and a stale queued frame is worth less than a fresh one
-   * once loss is real. All three are also logged, throttled, for offline analysis.
+   * newest decodable chain rather than allowing a backlog to accumulate.
+   * Already-sent fragments can still be repaired from the retransmission cache.
    */
   private handleIncomingRtcp(msg: Buffer): void {
     let offset = 0;
@@ -383,7 +417,7 @@ export class MirroringSender extends EventEmitter {
       if (packetType === RTCP_PT_RECEIVER_REPORT) this.handleReceiverReport(packet);
       else if (packetType === RTCP_PT_PAYLOAD_SPECIFIC) {
         const format = first & 0x1f;
-        if (format === RTCP_FMT_CAST_FEEDBACK) this.handleCastFeedback(packet);
+        if (format === RTCP_FMT_CAST_FEEDBACK) { this.handleCastFeedback(packet); if (this.audioAccepted) this.audio.feedback(packet); }
         else if (format === RTCP_FMT_PICTURE_LOSS) this.handlePictureLoss(packet);
       }
       offset += packetLength;
@@ -392,21 +426,29 @@ export class MirroringSender extends EventEmitter {
 
   private handleReceiverReport(packet: Buffer): void {
     if (packet.length < 32 || (packet[0] & 0x1f) < 1) return;
-    const block = packet.subarray(8, 32);
+    let block: Buffer | null = null;
+    for (let i = 0; i < (packet[0] & 0x1f); i++) {
+      const offset = 8 + i * 24;
+      if (offset + 24 > packet.length) return;
+      if (packet.readUInt32BE(offset) === this.videoSsrc) block = packet.subarray(offset, offset + 24);
+    }
+    if (!block) return;
     const fractionLost = block[4] / 256;
     const jitterTicks = block.readUInt32BE(12);
     const jitterMs = (jitterTicks / VIDEO_TIME_BASE_HZ) * 1000;
     const lsr = block.readUInt32BE(16);
     const dlsr = block.readUInt32BE(20);
     let rttMs: number | null = null;
-    if (lsr !== 0 && this.lastSrNtpMiddle32 !== null) {
-      const nowMs = Date.now();
+    if (lsr !== 0 && lsr === this.lastSrNtpMiddle32) {
+      const nowMs = this.epochWallMs + performance.now() - this.epochMonotonicMs;
       const nowNtpSeconds = Math.floor(nowMs / 1000) + NTP_UNIX_EPOCH_OFFSET;
       const nowNtpFraction = Math.round(((nowMs % 1000) / 1000) * 0x100000000);
       const nowMiddle32 = this.ntpMiddle32(nowNtpSeconds, nowNtpFraction);
       const rtt65536ths = (nowMiddle32 - lsr - dlsr) >>> 0;
       rttMs = (rtt65536ths / 65536) * 1000;
+      if (rttMs > 60000) rttMs = null;
     }
+    this.emit('feedback', { loss: fractionLost, jitterMs, rttMs });
     if (fractionLost > RTCP_LOSS_DROP_THRESHOLD) this.pacing?.dropToNewest();
     const now = performance.now();
     if (now - this.lastRtcpLogAtMs < DIAG_LOG_INTERVAL_MS) return;
@@ -455,8 +497,14 @@ export class MirroringSender extends EventEmitter {
       }
     }
     this.feedbackRequested += requested;
+    this.repairRequestsInWindow += requested;
     this.feedbackRetransmitted += retransmitted;
+    if (requested) this.emit('repair', { requested, retransmitted });
     const now = performance.now();
+    if (now - this.repairWindowStartedAt >= DIAG_LOG_INTERVAL_MS && this.originalPacketsInWindow > 0) {
+      this.emit('repair-window', { pressure: Math.min(1, this.repairRequestsInWindow / this.originalPacketsInWindow) });
+      this.repairWindowStartedAt = now; this.originalPacketsInWindow = 0; this.repairRequestsInWindow = 0;
+    }
     if (now - this.lastRtcpLogAtMs >= DIAG_LOG_INTERVAL_MS) {
       this.lastRtcpLogAtMs = now;
       log.info(

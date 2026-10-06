@@ -1,6 +1,6 @@
 {
   "name": "airwing",
-  "version": "1.1.10",
+  "version": "1.2.0",
   "description": "Wireless screen mirroring, media streaming and extended desktop for Windows. Mirror to Apple TV (AirPlay), Chromecast (Google Cast), Reflector, and any web browser.",
   "main": "./out/main/index.js",
   "author": "AirWing contributors",
@@ -16,7 +16,9 @@
     "test": "vitest run",
     "test:e2e": "playwright test",
     "dist": "electron-vite build && electron-builder --win --x64",
-    "dist:dir": "electron-vite build && electron-builder --win --x64 --dir"
+    "dist:dir": "electron-vite build && electron-builder --win --x64 --dir",
+    "store:check": "node scripts/build-store.cjs --check",
+    "dist:store": "node scripts/build-store.cjs"
   },
   "dependencies": {
     "bplist-creator": "^0.3.0",

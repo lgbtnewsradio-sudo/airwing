@@ -1,4 +1,4 @@
-import { promises as fs, existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { promises as fs, existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { DEFAULT_SETTINGS, type AppSettings } from '@shared/types';
@@ -84,17 +84,31 @@ export class SettingsStore extends EventEmitter {
 export class CredentialStore {
   private readonly file: string;
   private data: Record<string, string> = {};
+  private encrypted: Record<string, string> = {};
 
-  constructor(userDataDir: string) {
+  constructor(userDataDir: string, private readonly encryption?: {
+    isEncryptionAvailable(): boolean;
+    encryptString(value: string): Buffer;
+    decryptString(value: Buffer): string;
+  }) {
     this.file = join(userDataDir, 'credentials.json');
     try {
-      if (existsSync(this.file)) this.data = JSON.parse(readFileSync(this.file, 'utf8'));
+      if (existsSync(this.file)) {
+        const parsed = JSON.parse(readFileSync(this.file, 'utf8'));
+        if (parsed.version === 2 && parsed.entries) this.encrypted = parsed.entries;
+        else this.data = parsed;
+      }
     } catch {
       this.data = {};
     }
   }
 
   get(deviceKey: string): string | undefined {
+    if (this.data[deviceKey] !== undefined) return this.data[deviceKey];
+    if (this.encrypted[deviceKey] && this.encryption?.isEncryptionAvailable()) {
+      try { return this.encryption.decryptString(Buffer.from(this.encrypted[deviceKey], 'base64')); }
+      catch { log.warn('credentials', 'A saved pairing could not be decrypted; forget it and pair again.'); return undefined; }
+    }
     return this.data[deviceKey];
   }
 
@@ -105,17 +119,29 @@ export class CredentialStore {
 
   remove(deviceKey: string): void {
     delete this.data[deviceKey];
+    delete this.encrypted[deviceKey];
     this.persist();
   }
 
   keys(): string[] {
-    return Object.keys(this.data);
+    return [...new Set([...Object.keys(this.data), ...Object.keys(this.encrypted)])];
   }
 
+  migrate(): void { if (Object.keys(this.data).length) this.persist(); }
+
   private persist(): void {
+    if (Object.keys(this.data).length && !this.encryption?.isEncryptionAvailable()) {
+      log.warn('credentials', 'Secure storage is unavailable; new pairing keys are kept in memory only.');
+      return;
+    }
     try {
+      const entries = { ...this.encrypted };
+      for (const [key, value] of Object.entries(this.data)) entries[key] = this.encryption!.encryptString(value).toString('base64');
       mkdirSync(dirname(this.file), { recursive: true });
-      writeFileSync(this.file, JSON.stringify(this.data, null, 2), 'utf8');
+      writeFileSync(this.file + '.tmp', JSON.stringify({ version: 2, entries }, null, 2), 'utf8');
+      renameSync(this.file + '.tmp', this.file);
+      this.encrypted = entries;
+      this.data = {};
     } catch (err) {
       log.error('credentials', `failed to save credentials: ${(err as Error).message}`);
     }

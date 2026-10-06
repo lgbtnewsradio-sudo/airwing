@@ -4,6 +4,7 @@ export interface RtpQueuedFrame {
   frameId: number;
   referencedFrameId: number;
   enqueuedAtMs: number;
+  captureTimestampUs?: number;
 }
 
 /** Wall-clock cadence the queue drains at: 30fps, matching the stream's target frame rate. */

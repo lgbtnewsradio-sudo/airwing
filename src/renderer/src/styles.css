@@ -67,6 +67,10 @@ body {
   letter-spacing: 0.2px;
 }
 
+.titlebar [role="status"] { color: var(--accent); white-space: nowrap; }
+.receiver .row-sub { white-space: normal; overflow-wrap: anywhere; }
+.panel-header { flex-wrap: wrap; }
+
 .window-controls {
   margin-left: auto;
   display: flex;
